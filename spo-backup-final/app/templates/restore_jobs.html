@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}Restore Jobs{% endblock %}
+{% block page_title %}<i class="bi bi-list-task" style="color:var(--accent);"></i> Restore Jobs{% endblock %}
+{% block content %}
+<div class="row g-4">
+    <div class="col-lg-5">
+        <div class="glass-card">
+            <div class="card-header"><h6><i class="bi bi-plus-circle"></i> New Restore Job</h6></div>
+            <div class="card-body">
+                {% if not active_tenant %}
+                <div style="color:var(--text-dim);">No active tenant.</div>
+                {% else %}
+                <form id="jobForm" class="form-modern">
+                    <div class="mb-3"><label>Backup</label><select id="jobBackup"><option value="">Select backup...</option>{% for b in backups %}<option value="{{ b.name }}">{{ b.name }} — {{ b.date }}</option>{% endfor %}</select></div>
+                    <div class="mb-3"><label>Source Site</label><select id="jobSourceSite"><option value="">Select backup first...</option></select></div>
+                    <div class="mb-3"><label>Target Site Path</label><input id="jobTargetSite" type="text" placeholder="sites/TargetSite"></div>
+                    <div class="mb-3"><label>Mode</label><select id="jobMode"><option value="merge">Merge</option><option value="overwrite">Overwrite</option><option value="new_location">New Location</option></select></div>
+                    <div class="mb-3"><label>New Location Path (optional)</label><input id="jobTargetLocation" type="text" placeholder="sites/NewTarget"></div>
+                    <button class="btn-modern btn-primary-modern" type="submit"><i class="bi bi-play-fill"></i> Queue Restore</button>
+                </form>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    <div class="col-lg-7">
+        <div class="glass-card">
+            <div class="card-header"><h6><i class="bi bi-arrow-repeat"></i> Queue</h6></div>
+            <div class="card-body"><div id="jobsList">{% for job in jobs %}<div class="glass-card" style="margin-bottom:12px;"><div class="card-body" style="padding:14px 16px;"><div class="d-flex justify-content-between align-items-center"><div><strong>{{ job.source_backup }}</strong><div style="font-size:12px;color:var(--text-dim);">{{ job.source_site }} → {{ job.target_site }}</div></div><span class="badge-modern badge-info">{{ job.status }}</span></div></div></div>{% else %}<div style="color:var(--text-dim);">No restore jobs yet.</div>{% endfor %}</div></div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+{% block extra_js %}
+<script>
+async function refreshJobs() {
+    const res = await apiCall('/api/restore/jobs');
+    const jobs = res.jobs || [];
+    const container = document.getElementById('jobsList');
+    if (!jobs.length) {
+        container.innerHTML = '<div style="color:var(--text-dim);">No restore jobs yet.</div>';
+        return;
+    }
+    container.innerHTML = jobs.map(job => `<div class="glass-card" style="margin-bottom:12px;"><div class="card-body" style="padding:14px 16px;"><div class="d-flex justify-content-between align-items-center"><div><strong>${job.source_backup}</strong><div style="font-size:12px;color:var(--text-dim);">${job.source_site || '-'} -> ${job.target_site || '-'}</div><div style="font-size:12px;color:var(--text-dim);">Progress: ${job.progress || 0}% | Files: ${job.files_done || 0}</div></div><span class="badge-modern badge-info">${job.status}</span></div></div></div>`).join('');
+}
+const backupSel = document.getElementById('jobBackup');
+if (backupSel) {
+    backupSel.addEventListener('change', async (e) => {
+        const siteSel = document.getElementById('jobSourceSite');
+        siteSel.innerHTML = '<option>Loading...</option>';
+        if (!e.target.value) return;
+        const data = await apiCall(`/api/backups/${e.target.value}`);
+        siteSel.innerHTML = '<option value="">Choose site...</option>';
+        (data.sites || []).forEach(s => siteSel.innerHTML += `<option value="${s.display_name}">${s.display_name}</option>`);
+    });
+    document.getElementById('jobForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const res = await apiCall('/api/restore/jobs', 'POST', {
+            workload: 'sharepoint',
+            source_backup: document.getElementById('jobBackup').value,
+            source_site: document.getElementById('jobSourceSite').value,
+            target_site: document.getElementById('jobTargetSite').value.trim(),
+            target_location: document.getElementById('jobTargetLocation').value.trim(),
+            mode: document.getElementById('jobMode').value,
+        });
+        if (res.status === 'created') { showToast('Restore job queued', 'success'); refreshJobs(); }
+        else { showToast(res.error || 'Failed to create job', 'error'); }
+    });
+    setInterval(refreshJobs, 5000);
+}
+</script>
+{% endblock %}

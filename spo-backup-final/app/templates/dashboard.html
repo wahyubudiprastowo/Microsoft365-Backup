@@ -1,0 +1,324 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block page_title %}<i class="bi bi-grid-1x2-fill" style="color:var(--primary);"></i> Dashboard{% endblock %}
+{% block content %}
+<div class="glass-card mb-4" style="border-color:rgba(6,182,212,0.2);">
+    <div class="card-body" style="display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap;">
+        <div style="width:44px;height:44px;border-radius:12px;background:rgba(6,182,212,0.12);display:flex;align-items:center;justify-content:center;color:var(--accent);font-size:22px;">
+            <i class="bi bi-signpost-split-fill"></i>
+        </div>
+        <div style="flex:1;min-width:260px;">
+            <div style="font-weight:700;font-size:15px;">Operational Mode Guide</div>
+            <div style="color:var(--text-muted);font-size:13px;margin-top:4px;">
+                Untuk operasi harian multi-tenant, gunakan <a href="/backups" style="color:var(--accent);font-weight:600;">Backups</a>,
+                <a href="/restore-v2" style="color:var(--accent);font-weight:600;">Restore V2</a>, dan <a href="/schedules" style="color:var(--accent);font-weight:600;">Schedules</a>.
+                Tombol legacy di dashboard ini hanya untuk flow SharePoint lama.
+            </div>
+        </div>
+    </div>
+</div>
+<div class="row g-4 mb-4">
+    <div class="col-md-3"><div class="stat-card">
+        <div class="stat-icon" style="background:rgba(99,102,241,0.15);color:var(--primary);"><i class="bi bi-globe2"></i></div>
+        <div class="stat-value">{{ config.sites|length }}</div><div class="stat-label">Total Sites</div>
+    </div></div>
+    <div class="col-md-3"><div class="stat-card">
+        <div class="stat-icon" style="background:rgba(16,185,129,0.15);color:var(--success);"><i class="bi bi-check-circle-fill"></i></div>
+        <div class="stat-value">{{ config.sites|selectattr('enabled')|list|length }}</div><div class="stat-label">Enabled Sites</div>
+    </div></div>
+    <div class="col-md-3"><div class="stat-card">
+        <div class="stat-icon" style="background:rgba(6,182,212,0.15);color:var(--accent);"><i class="bi bi-archive-fill"></i></div>
+        <div class="stat-value">{{ backups|length }}</div><div class="stat-label">Total Backups</div>
+    </div></div>
+    <div class="col-md-3"><div class="stat-card">
+        <div class="stat-icon" style="background:rgba(245,158,11,0.15);color:var(--warning);"><i class="bi bi-clock-fill"></i></div>
+        <div class="stat-value" style="font-size:18px;font-family:'JetBrains Mono',monospace;">{{ config.schedule.cron_expression }}</div>
+        <div class="stat-label">Cron Schedule</div>
+    </div></div>
+</div>
+
+<!-- Progress panel -->
+<div class="glass-card mb-4" id="progressPanel" style="display:none;">
+    <div class="card-header">
+        <h6><i class="bi bi-arrow-repeat spin" style="color:var(--accent);"></i> Backup in Progress</h6>
+        <span class="badge-modern badge-info" id="progressState">RUNNING</span>
+    </div>
+    <div class="card-body">
+        <div class="row g-3 mb-3">
+            <div class="col-md-3"><div style="background:rgba(99,102,241,0.06);border:1px solid var(--border);border-radius:10px;padding:12px;">
+                <div style="font-size:10px;color:var(--text-muted);font-weight:700;text-transform:uppercase;letter-spacing:1px;">Current Site</div>
+                <div id="bCurrentSite" style="font-size:14px;font-weight:600;margin-top:4px;">--</div>
+            </div></div>
+            <div class="col-md-3"><div style="background:rgba(6,182,212,0.06);border:1px solid rgba(6,182,212,0.2);border-radius:10px;padding:12px;">
+                <div style="font-size:10px;color:var(--text-muted);font-weight:700;text-transform:uppercase;letter-spacing:1px;">Files</div>
+                <div id="bFiles" style="font-size:18px;font-weight:700;margin-top:4px;">0 / 0</div>
+            </div></div>
+            <div class="col-md-3"><div style="background:rgba(16,185,129,0.06);border:1px solid rgba(16,185,129,0.2);border-radius:10px;padding:12px;">
+                <div style="font-size:10px;color:var(--text-muted);font-weight:700;text-transform:uppercase;letter-spacing:1px;">Speed</div>
+                <div id="bSpeed" style="font-size:18px;font-weight:700;margin-top:4px;">0 KB/s</div>
+            </div></div>
+            <div class="col-md-3"><div style="background:rgba(245,158,11,0.06);border:1px solid rgba(245,158,11,0.2);border-radius:10px;padding:12px;">
+                <div style="font-size:10px;color:var(--text-muted);font-weight:700;text-transform:uppercase;letter-spacing:1px;">ETA</div>
+                <div id="bEta" style="font-size:18px;font-weight:700;margin-top:4px;">--</div>
+            </div></div>
+        </div>
+        <div class="row g-3 mb-3">
+            <div class="col-md-4"><div style="background:rgba(16,185,129,0.06);border:1px solid rgba(16,185,129,0.2);border-radius:10px;padding:12px;">
+                <div style="font-size:10px;color:var(--text-muted);font-weight:700;text-transform:uppercase;letter-spacing:1px;">Downloaded Files</div>
+                <div id="bFilesDownloaded" style="font-size:18px;font-weight:700;margin-top:4px;">0</div>
+            </div></div>
+            <div class="col-md-4"><div style="background:rgba(100,116,139,0.08);border:1px solid rgba(100,116,139,0.2);border-radius:10px;padding:12px;">
+                <div style="font-size:10px;color:var(--text-muted);font-weight:700;text-transform:uppercase;letter-spacing:1px;">Skipped Unchanged</div>
+                <div id="bFilesSkipped" style="font-size:18px;font-weight:700;margin-top:4px;">0</div>
+            </div></div>
+            <div class="col-md-4"><div style="background:rgba(6,182,212,0.08);border:1px solid rgba(6,182,212,0.2);border-radius:10px;padding:12px;">
+                <div style="font-size:10px;color:var(--text-muted);font-weight:700;text-transform:uppercase;letter-spacing:1px;">Resumed Files</div>
+                <div id="bFilesResumed" style="font-size:18px;font-weight:700;margin-top:4px;">0</div>
+            </div></div>
+        </div>
+        <div style="background:rgba(255,255,255,0.02);border:1px solid var(--border);border-radius:10px;padding:14px;">
+            <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:8px;">
+                <span id="bCurrentFile" style="color:var(--text-muted);font-family:'JetBrains Mono',monospace;max-width:70%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Preparing...</span>
+                <span style="color:var(--text);font-weight:600;" id="bOverallPct">0%</span>
+            </div>
+            <div class="progress-modern"><div class="progress-bar-modern" id="bProgressBar" style="width:0%;"></div></div>
+        </div>
+
+        <!-- Task ID display -->
+        <div style="margin-top:14px;padding:10px 14px;background:rgba(99,102,241,0.06);border:1px solid var(--border);border-radius:10px;font-size:12px;color:var(--text-muted);">
+            <i class="bi bi-hash"></i> Task ID: <code id="bTaskId" style="color:var(--primary);">--</code>
+        </div>
+
+        <!-- Control buttons -->
+        <div class="mt-3 d-flex gap-2 justify-content-end">
+            <button class="btn-modern" onclick="pauseBackup()" id="bPauseBtn" style="background:rgba(245,158,11,0.15);color:var(--warning);border:1px solid rgba(245,158,11,0.3);">
+                <i class="bi bi-pause-fill"></i> Pause
+            </button>
+            <button class="btn-modern" onclick="resumeBackup()" id="bResumeBtn" style="display:none;background:rgba(16,185,129,0.15);color:var(--success);border:1px solid rgba(16,185,129,0.3);">
+                <i class="bi bi-play-fill"></i> Resume
+            </button>
+            <button class="btn-modern btn-danger-modern" onclick="cancelBackup()" id="bCancelBtn">
+                <i class="bi bi-x-circle-fill"></i> Cancel
+            </button>
+        </div>
+    </div>
+</div>
+
+<div class="row g-4">
+    <div class="col-md-7"><div class="glass-card">
+        <div class="card-header"><h6><i class="bi bi-archive-fill" style="color:var(--accent);"></i> Recent Backups</h6>
+            <a href="/backups" class="btn-modern btn-ghost-modern" style="padding:6px 14px;font-size:12px;">View All</a></div>
+        <div class="card-body p-0"><table class="table-modern">
+            <thead><tr><th>Backup</th><th>Date</th><th>Size</th></tr></thead>
+            <tbody>{% for b in backups[:6] %}<tr>
+                <td><i class="bi bi-folder-fill" style="color:{% if b.type == 'custom' %}var(--accent){% else %}var(--primary){% endif %};margin-right:6px;"></i>{{ b.name }}</td>
+                <td>{{ b.date }}</td>
+                <td>{{ b.size_human }}</td>
+            </tr>{% else %}<tr><td colspan="3" style="text-align:center;color:var(--text-dim);padding:30px;">
+                <i class="bi bi-inbox" style="font-size:32px;display:block;margin-bottom:8px;opacity:0.5;"></i>No backups yet
+            </td></tr>{% endfor %}</tbody>
+        </table></div>
+    </div></div>
+    <div class="col-md-5"><div class="glass-card">
+        <div class="card-header"><h6><i class="bi bi-globe2" style="color:var(--primary);"></i> Sites Status</h6>
+            <a href="/sites" class="btn-modern btn-ghost-modern" style="padding:6px 14px;font-size:12px;">Manage</a></div>
+        <div class="card-body p-0" style="max-height:360px;overflow-y:auto;"><table class="table-modern"><tbody>
+            {% for s in config.sites %}<tr>
+                <td><i class="bi bi-globe" style="color:{% if s.enabled %}var(--success){% else %}var(--text-dim){% endif %};margin-right:6px;"></i>{{ s.name }}</td>
+                <td style="text-align:right;">{% if s.enabled %}<span class="badge-modern badge-success"><i class="bi bi-check-circle"></i> ON</span>{% else %}<span class="badge-modern" style="background:rgba(100,116,139,0.15);color:var(--text-dim);">OFF</span>{% endif %}</td>
+            </tr>{% endfor %}
+        </tbody></table></div>
+    </div></div>
+</div>
+
+<div class="glass-card mt-4">
+    <div class="card-header"><h6><i class="bi bi-terminal-fill" style="color:var(--accent);"></i> Recent Activity</h6>
+        <a href="/logs" class="btn-modern btn-ghost-modern" style="padding:6px 14px;font-size:12px;">Full Logs</a></div>
+    <div class="card-body p-0"><div class="log-viewer" style="border-radius:0;border:none;max-height:240px;">
+        {% for line in logs %}<div class="{% if 'ERROR' in line %}log-error{% elif 'WARNING' in line %}log-warn{% elif '✅' in line %}log-success{% else %}log-info{% endif %}">{{ line }}</div>{% else %}<div style="color:var(--text-dim);text-align:center;padding:20px;">No logs yet</div>{% endfor %}
+    </div></div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+let currentBackupTaskId = null;
+let backupPollInterval = null;
+let cancelInProgress = false;
+let lastBackupToastKey = null;
+
+function showBackupToastOnce(message, level = 'error') {
+    const key = `${level}:${message}`;
+    if (lastBackupToastKey === key) return;
+    lastBackupToastKey = key;
+    showToast(message, level);
+}
+
+async function checkActiveTask() {
+    try {
+        const res = await apiCall('/api/task/active');
+        if (res.backup_task_id) {
+            console.log('Active backup found:', res.backup_task_id);
+            currentBackupTaskId = res.backup_task_id;
+            document.getElementById('bTaskId').textContent = res.backup_task_id.substring(0, 8) + '...';
+            document.getElementById('progressPanel').style.display = 'block';
+            startPolling(res.backup_task_id);
+        }
+    } catch (e) { console.error(e); }
+}
+
+window.startBackup = async function() {
+    if (!confirm('Start legacy incremental backup for all enabled SharePoint sites?')) return;
+    try {
+        const res = await fetch('/api/backup/start', {
+            method: 'POST',
+            headers: {'Content-Type':'application/json'},
+            body: '{}'
+        });
+        const data = await res.json();
+        if (data.task_id) {
+            currentBackupTaskId = data.task_id;
+            cancelInProgress = false;
+            showToast('Legacy backup started: ' + data.task_id.substring(0, 8), 'success');
+            document.getElementById('bTaskId').textContent = data.task_id.substring(0, 8) + '...';
+            document.getElementById('progressPanel').style.display = 'block';
+            document.getElementById('progressPanel').scrollIntoView({ behavior: 'smooth' });
+            startPolling(data.task_id);
+        }
+    } catch(e) {
+        showToast('Error: ' + e, 'error');
+    }
+};
+
+function startPolling(taskId) {
+    if (backupPollInterval) clearInterval(backupPollInterval);
+    backupPollInterval = setInterval(async () => {
+        // ★ Stop polling if cancel in progress and got REVOKED ★
+        try {
+            const data = await apiCall(`/api/backup/status/${taskId}`);
+
+            if (data.state === 'PROGRESS' && data.meta && !cancelInProgress) {
+                const m = data.meta;
+                document.getElementById('bCurrentSite').textContent = m.current_site || '--';
+                document.getElementById('bFiles').textContent = `${m.files_done || 0} / ${m.files_total || 0}`;
+                document.getElementById('bSpeed').textContent = m.is_paused ? '⏸ Paused' : (m.speed_human || '0 KB/s');
+                document.getElementById('bEta').textContent = m.is_paused ? '--' : (m.eta_human || '--');
+                document.getElementById('bFilesDownloaded').textContent = (m.files_downloaded || 0).toLocaleString();
+                document.getElementById('bFilesSkipped').textContent = (m.files_skipped || 0).toLocaleString();
+                document.getElementById('bFilesResumed').textContent = (m.files_resumed || 0).toLocaleString();
+                document.getElementById('bCurrentFile').textContent = m.current_file || 'Working...';
+                document.getElementById('bOverallPct').textContent = (m.overall_pct || 0) + '%';
+                document.getElementById('bProgressBar').style.width = (m.overall_pct || 0) + '%';
+
+                if (data.control_state === 'paused') {
+                    document.getElementById('bPauseBtn').style.display = 'none';
+                    document.getElementById('bResumeBtn').style.display = 'inline-flex';
+                    document.getElementById('progressState').textContent = 'PAUSED';
+                    document.getElementById('progressState').className = 'badge-modern badge-warning';
+                } else if (data.control_state === 'cancelled') {
+                    // ★ Control flag set to cancelled — show cancelling state ★
+                    document.getElementById('progressState').textContent = 'CANCELLING...';
+                    document.getElementById('progressState').className = 'badge-modern badge-warning';
+                } else {
+                    document.getElementById('bPauseBtn').style.display = 'inline-flex';
+                    document.getElementById('bResumeBtn').style.display = 'none';
+                    document.getElementById('progressState').textContent = 'RUNNING';
+                    document.getElementById('progressState').className = 'badge-modern badge-info';
+                }
+            }
+            else if (data.state === 'SUCCESS') {
+                clearInterval(backupPollInterval);
+                const r = data.result || {};
+                if (r.cancelled) {
+                    document.getElementById('progressState').textContent = 'CANCELLED';
+                    document.getElementById('progressState').className = 'badge-modern badge-danger';
+                    showToast('Backup cancelled', 'warning');
+                } else {
+                    document.getElementById('progressState').textContent = 'COMPLETED';
+                    document.getElementById('progressState').className = 'badge-modern badge-success';
+                    showToast(`Done! ${r.successful_sites || 0}/${r.total_sites || 0} sites, ${r.files_downloaded || 0} files`, 'success');
+                }
+                setTimeout(() => location.reload(), 2500);
+            }
+            else if (data.state === 'BACKUP_FAILED') {
+                clearInterval(backupPollInterval);
+                document.getElementById('progressState').textContent = 'FAILED';
+                document.getElementById('progressState').className = 'badge-modern badge-danger';
+                const err = (data.meta && data.meta.errors && data.meta.errors.length) ? data.meta.errors[0] : (data.error || 'Backup failed');
+                showBackupToastOnce(err, 'error');
+            }
+            else if (data.state === 'FAILURE' || data.state === 'REVOKED' || data.state === 'UNKNOWN') {
+                clearInterval(backupPollInterval);
+                document.getElementById('progressState').textContent = data.state === 'REVOKED' ? 'CANCELLED' : 'FAILED';
+                document.getElementById('progressState').className = 'badge-modern badge-danger';
+                showBackupToastOnce(
+                    data.state === 'REVOKED' ? 'Backup cancelled' : (data.error || 'Backup failed'),
+                    data.state === 'REVOKED' ? 'warning' : 'error'
+                );
+                currentBackupTaskId = null;
+                // ★ Hide progress panel after 3 seconds ★
+                setTimeout(() => {
+                    document.getElementById('progressPanel').style.display = 'none';
+                }, 3000);
+            }
+        } catch(e) { console.error(e); }
+    }, 1000);
+}
+
+async function pauseBackup() {
+    if (!currentBackupTaskId) return;
+    await apiCall(`/api/task/${currentBackupTaskId}/pause`, 'POST');
+    showToast('Backup paused', 'warning');
+}
+
+async function resumeBackup() {
+    if (!currentBackupTaskId) return;
+    await apiCall(`/api/task/${currentBackupTaskId}/resume`, 'POST');
+    showToast('Backup resumed', 'success');
+}
+
+// ═══════════════════════════════════════════════════════════
+// ★ ROBUST CANCEL — actually stops & cleans up ★
+// ═══════════════════════════════════════════════════════════
+async function cancelBackup() {
+    if (!currentBackupTaskId) return;
+    if (!confirm('Cancel backup?\n\nProgress yang sudah download tetap disimpan, tapi backup akan stop.')) return;
+    
+    const cancelBtn = document.getElementById('bCancelBtn');
+    cancelBtn.disabled = true;
+    cancelBtn.innerHTML = '<i class="bi bi-arrow-repeat spin"></i> Cancelling...';
+    cancelInProgress = true;
+    
+    try {
+        const res = await apiCall(`/api/task/${currentBackupTaskId}/cancel`, 'POST');
+        if (res.status === 'cancelled') {
+            showToast('Cancel requested. Task akan stop dalam beberapa detik.', 'info');
+            
+            // Update UI immediately
+            document.getElementById('progressState').textContent = 'CANCELLING...';
+            document.getElementById('progressState').className = 'badge-modern badge-warning';
+            
+            // Force-stop polling after 10 seconds even if task doesn't acknowledge
+            setTimeout(() => {
+                if (backupPollInterval) clearInterval(backupPollInterval);
+                document.getElementById('progressState').textContent = 'CANCELLED';
+                document.getElementById('progressState').className = 'badge-modern badge-danger';
+                // Hide progress panel
+                setTimeout(() => {
+                    document.getElementById('progressPanel').style.display = 'none';
+                    currentBackupTaskId = null;
+                    cancelInProgress = false;
+                }, 3000);
+            }, 10000);
+        }
+    } catch(e) {
+        showToast('Cancel error: ' + e, 'error');
+        cancelBtn.disabled = false;
+        cancelBtn.innerHTML = '<i class="bi bi-x-circle-fill"></i> Cancel';
+        cancelInProgress = false;
+    }
+}
+
+window.addEventListener('load', checkActiveTask);
+</script>
+{% endblock %}

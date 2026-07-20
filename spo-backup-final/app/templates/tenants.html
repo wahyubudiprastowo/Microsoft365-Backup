@@ -1,0 +1,269 @@
+{% extends "base.html" %}
+{% block title %}Tenants{% endblock %}
+{% block page_title %}<i class="bi bi-building" style="color:var(--primary);"></i> Tenants{% endblock %}
+{% block topbar_actions %}
+<button class="btn-modern btn-primary-modern" onclick="showAddTenantModal()"><i class="bi bi-plus-lg"></i> Add Tenant</button>
+{% endblock %}
+{% block content %}
+<div class="glass-card mb-4">
+    <div class="card-header"><h6><i class="bi bi-key-fill" style="color:var(--accent);"></i> Required Graph Permissions</h6></div>
+    <div class="card-body">
+        <div class="d-flex flex-wrap gap-2">
+            {% for scope in required_scopes %}
+            <span class="badge-modern badge-primary" style="font-family:'JetBrains Mono',monospace;">{{ scope }}</span>
+            {% endfor %}
+        </div>
+    </div>
+</div>
+<div class="row g-4">
+    {% for tenant in tenants %}
+    <div class="col-lg-4 col-md-6">
+        <div class="glass-card" style="{% if active_tenant and tenant.id == active_tenant.id %}border-color:var(--primary);box-shadow:0 0 0 1px var(--primary), 0 8px 32px rgba(99,102,241,0.2);{% endif %}">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-start mb-3">
+                    <div>
+                        <h5 style="margin:0;">{{ tenant.name }}</h5>
+                        <div style="color:var(--text-muted);font-family:'JetBrains Mono',monospace;font-size:12px;">{{ tenant.sharepoint_host }}</div>
+                    </div>
+                    {% if active_tenant and tenant.id == active_tenant.id %}
+                    <span class="badge-modern badge-primary"><i class="bi bi-star-fill"></i> Active</span>
+                    {% endif %}
+                </div>
+                <div style="font-size:13px;color:var(--text-muted);margin-bottom:12px;">
+                    <div>Primary Domain: <strong>{{ tenant.primary_domain }}</strong></div>
+                    <div>Status: <strong>{{ tenant.last_status }}</strong></div>
+                </div>
+                <div class="d-flex gap-2">
+                    {% if not active_tenant or tenant.id != active_tenant.id %}
+                    <button class="btn-modern btn-ghost-modern" style="flex:1;justify-content:center;padding:8px 10px;" onclick="activateTenant('{{ tenant.id }}')">Set Active</button>
+                    {% endif %}
+                    <button class="btn-modern btn-ghost-modern" style="padding:8px 12px;" onclick="showEditTenantModal('{{ tenant.id }}')"><i class="bi bi-pencil-square"></i></button>
+                    <button class="btn-modern btn-ghost-modern" style="flex:1;justify-content:center;padding:8px 10px;" onclick="testTenant('{{ tenant.id }}', this)">Test</button>
+                    <button class="btn-modern btn-danger-modern" style="padding:8px 12px;" onclick="deleteTenant('{{ tenant.id }}', '{{ tenant.name }}')"><i class="bi bi-trash"></i></button>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% else %}
+    <div class="col-12"><div class="glass-card"><div class="card-body" style="text-align:center;padding:48px 20px;color:var(--text-dim);">No tenants configured yet.</div></div></div>
+    {% endfor %}
+</div>
+
+<div class="modal fade" id="tenantModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content" style="background:var(--bg-elevated);border:1px solid var(--border);border-radius:16px;position:relative;z-index:2101;pointer-events:auto;">
+            <div class="modal-header" style="border-bottom:1px solid var(--border);">
+                <h5 class="modal-title" id="tenantModalTitle"><i class="bi bi-building-add" style="color:var(--accent);"></i> Add Tenant</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="form-modern">
+                    <input id="tId" type="hidden">
+                    <div class="row g-3">
+                        <div class="col-md-6"><label>Name</label><input id="tName" type="text" placeholder="Contoso"></div>
+                        <div class="col-md-6"><label>Primary Domain</label><input id="tDomain" type="text" placeholder="contoso.onmicrosoft.com"></div>
+                        <div class="col-md-6"><label>SharePoint Host</label><input id="tSpHost" type="text" placeholder="contoso.sharepoint.com"></div>
+                        <div class="col-md-6"><label>Tenant ID</label><input id="tTenantId" type="text" placeholder="GUID"></div>
+                        <div class="col-md-6"><label>Client ID</label><input id="tClientId" type="text" placeholder="GUID"></div>
+                        <div class="col-md-6"><label>Client Secret</label><input id="tSecret" type="password" placeholder="secret"></div>
+                    </div>
+                    <div class="form-hint" id="tenantSecretHint" style="margin-top:10px;display:none;">
+                        Kosongkan `Client Secret` jika tidak ingin mengubah secret tenant yang sudah ada.
+                    </div>
+                </div>
+                <div id="tenantTestResult" style="margin-top:14px;font-size:13px;"></div>
+            </div>
+            <div class="modal-footer" style="border-top:1px solid var(--border);justify-content:space-between;">
+                <button type="button" class="btn-modern btn-ghost-modern" onclick="testTenantConfig()" id="tenantTestBtn">Test Connection</button>
+                <div class="d-flex gap-2">
+                    <button type="button" class="btn-modern btn-ghost-modern" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn-modern btn-primary-modern" onclick="connectTenant()" id="tenantSaveBtn">Save</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+{% block extra_js %}
+<script>
+const tenantRecords = {{ tenants|tojson }};
+let tenantModalInstance = null;
+
+function tenantById(id) {
+    return tenantRecords.find(item => item.id === id) || null;
+}
+
+function ensureTenantModal() {
+    const modalEl = document.getElementById('tenantModal');
+    if (!modalEl.dataset.movedToBody) {
+        document.body.appendChild(modalEl);
+        modalEl.dataset.movedToBody = '1';
+        modalEl.addEventListener('shown.bs.modal', () => {
+            const firstInput = document.getElementById('tName');
+            if (firstInput) {
+                firstInput.focus();
+                firstInput.select();
+            }
+        });
+    }
+    if (!tenantModalInstance) {
+        tenantModalInstance = new bootstrap.Modal(modalEl, {
+            backdrop: true,
+            focus: true,
+            keyboard: true,
+        });
+    }
+    return tenantModalInstance;
+}
+
+function resetTenantForm() {
+    ['tId','tName','tDomain','tSpHost','tTenantId','tClientId','tSecret'].forEach(id => {
+        document.getElementById(id).value = '';
+    });
+    document.getElementById('tenantTestResult').innerHTML = '';
+    document.getElementById('tenantModalTitle').innerHTML = '<i class="bi bi-building-add" style="color:var(--accent);"></i> Add Tenant';
+    document.getElementById('tenantSaveBtn').textContent = 'Save';
+    document.getElementById('tenantSecretHint').style.display = 'none';
+}
+
+function showAddTenantModal() {
+    resetTenantForm();
+    ensureTenantModal().show();
+}
+
+function showEditTenantModal(tenantId) {
+    const tenant = tenantById(tenantId);
+    if (!tenant) {
+        showToast('Tenant not found', 'error');
+        return;
+    }
+    resetTenantForm();
+    document.getElementById('tId').value = tenant.id || '';
+    document.getElementById('tName').value = tenant.name || '';
+    document.getElementById('tDomain').value = tenant.primary_domain || '';
+    document.getElementById('tSpHost').value = tenant.sharepoint_host || '';
+    document.getElementById('tTenantId').value = tenant.tenant_id || '';
+    document.getElementById('tClientId').value = tenant.client_id || '';
+    document.getElementById('tenantModalTitle').innerHTML = '<i class="bi bi-pencil-square" style="color:var(--accent);"></i> Edit Tenant';
+    document.getElementById('tenantSaveBtn').textContent = 'Update';
+    document.getElementById('tenantSecretHint').style.display = 'block';
+    ensureTenantModal().show();
+}
+
+function buildTenantData() {
+    return {
+        id: document.getElementById('tId').value.trim(),
+        name: document.getElementById('tName').value.trim(),
+        primary_domain: document.getElementById('tDomain').value.trim(),
+        sharepoint_host: document.getElementById('tSpHost').value.trim(),
+        tenant_id: document.getElementById('tTenantId').value.trim(),
+        client_id: document.getElementById('tClientId').value.trim(),
+        client_secret: document.getElementById('tSecret').value,
+    };
+}
+
+function validateTenantForm(data, mode = 'save') {
+    const required = ['name', 'primary_domain', 'sharepoint_host', 'tenant_id', 'client_id'];
+    if (!data.id || mode === 'test' || mode === 'add') {
+        required.push('client_secret');
+    }
+    const missing = required.filter(field => !String(data[field] || '').trim());
+    if (missing.length) {
+        showToast(`Missing field: ${missing[0]}`, 'warning');
+        return false;
+    }
+    return true;
+}
+
+async function testTenantConfig() {
+    const data = buildTenantData();
+    if (!validateTenantForm(data, 'test')) return;
+    const btn = document.getElementById('tenantTestBtn');
+    const original = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="bi bi-arrow-repeat spin"></i> Testing...';
+    const res = await apiCall('/api/tenants/test-config', 'POST', data);
+    btn.disabled = false;
+    btn.innerHTML = original;
+    document.getElementById('tenantTestResult').innerHTML = renderTenantTestResult(res);
+}
+async function connectTenant() {
+    const data = buildTenantData();
+    if (!validateTenantForm(data, data.id ? 'edit' : 'add')) return;
+    const btn = document.getElementById('tenantSaveBtn');
+    const original = btn.innerHTML;
+    const isEdit = !!data.id;
+    btn.disabled = true;
+    btn.innerHTML = `<i class="bi bi-arrow-repeat spin"></i> ${isEdit ? 'Updating...' : 'Saving...'}`;
+    const res = await apiCall(isEdit ? `/api/tenants/${data.id}` : '/api/tenants', isEdit ? 'PUT' : 'POST', data);
+    btn.disabled = false;
+    btn.innerHTML = original;
+    if (res.status === 'added' || res.status === 'updated') {
+        showToast(isEdit ? 'Tenant updated' : 'Tenant added', 'success');
+        ensureTenantModal().hide();
+        setTimeout(() => location.reload(), 500);
+    } else {
+        showToast(res.error || 'Failed', 'error');
+    }
+}
+async function activateTenant(tid) {
+    const res = await apiCall(`/api/tenants/${tid}/activate`, 'POST');
+    if (res.status === 'active') { showToast('Active tenant updated', 'success'); setTimeout(() => location.reload(), 500); }
+}
+async function testTenant(tid, btn) {
+    const html = btn.innerHTML;
+    btn.innerHTML = '<i class="bi bi-arrow-repeat spin"></i>';
+    btn.disabled = true;
+    const res = await apiCall(`/api/tenants/${tid}/test`, 'POST');
+    btn.innerHTML = html;
+    btn.disabled = false;
+    const summary = buildTenantTestSummary(res);
+    showToast(summary, res.status === 'ok' ? 'success' : 'warning');
+}
+async function deleteTenant(tid, name) {
+    if (!confirm(`Delete tenant "${name}"?`)) return;
+    const res = await apiCall(`/api/tenants/${tid}`, 'DELETE');
+    if (res.status === 'deleted') { showToast('Tenant deleted', 'success'); setTimeout(() => location.reload(), 500); }
+}
+
+function renderTenantTestResult(res) {
+    const statusColor = res.status === 'ok' ? 'var(--success)' : 'var(--warning)';
+    const details = res.details || {};
+    const rows = Object.entries(details).map(([key, value]) => {
+        const ok = !!value?.ok;
+        const code = value?.status ?? 'n/a';
+        const label = key.charAt(0).toUpperCase() + key.slice(1);
+        return `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 10px;border-radius:8px;background:rgba(255,255,255,0.03);margin-top:6px;">
+            <span style="font-size:13px;color:var(--text);">${escapeHtml(label)}</span>
+            <span class="badge-modern ${ok ? 'badge-success' : 'badge-warning'}">${ok ? 'OK' : 'Blocked'} ${escapeHtml(String(code))}</span>
+        </div>`;
+    }).join('');
+    return `<div style="margin-top:12px;padding:12px 14px;border-radius:12px;background:rgba(99,102,241,0.06);border:1px solid var(--border);">
+        <div style="font-weight:700;color:${statusColor};">${escapeHtml(res.message || 'Test completed')}</div>
+        ${rows ? `<div style="margin-top:10px;">${rows}</div>` : ''}
+    </div>`;
+}
+
+function buildTenantTestSummary(res) {
+    const details = res.details || {};
+    const failed = Object.entries(details)
+        .filter(([, value]) => !value?.ok)
+        .map(([key, value]) => `${key}:${value?.status ?? 'n/a'}`);
+    if (!failed.length) return res.message || 'Tenant connection OK';
+    return `${res.message || 'Tenant test completed'} (${failed.join(', ')})`;
+}
+
+function escapeHtml(value) {
+    return String(value)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    ensureTenantModal();
+});
+</script>
+{% endblock %}

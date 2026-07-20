@@ -1,0 +1,43 @@
+# Runtime data
+data/
+logs/
+redis/
+@eaDir/
+
+# Secrets and local config
+.env
+.env.*
+!.env.example
+config/config.json
+spo-backup-final/.env
+spo-backup-final/config.json
+*.pem
+*.key
+*.crt
+
+# Python cache / local tooling
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local debug / temp
+test-debug.py
+*.log
+
+# Non-public repo artifacts
+app-source/
+patch/

@@ -1,0 +1,82 @@
+# =============================================================================
+# Microsoft 365 Backup — Portable Deployment
+# Works from any clone location using relative paths or .env overrides
+# =============================================================================
+
+services:
+  spo-backup:
+    build: .
+    image: spo-backup:v4
+    container_name: spo-backup-web
+    restart: unless-stopped
+    user: "${SPO_UID:-1000}:${SPO_GID:-1000}"
+    ports:
+      - "${SPO_WEB_PORT:-5050}:5000"
+    volumes:
+      - ${SPO_DATA_DIR:-../data}:/backup/sharepoint
+      - ${SPO_CONFIG_FILE:-../config/config.json}:/app/config.json
+      - ${SPO_LOG_DIR:-../logs}:/app/logs
+    environment:
+      - SECRET_KEY=${SECRET_KEY:-digiserve-spo-backup-2026}
+      - TZ=${TZ:-Asia/Jakarta}
+      - CONFIG_PATH=/app/config.json
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks: [backup-net]
+
+  redis:
+    image: redis:7-alpine
+    container_name: spo-backup-redis
+    restart: unless-stopped
+    volumes:
+      - ${SPO_REDIS_DIR:-../redis}:/data
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks: [backup-net]
+
+  celery-worker:
+    image: spo-backup:v4
+    container_name: spo-backup-worker
+    restart: unless-stopped
+    user: "${SPO_UID:-1000}:${SPO_GID:-1000}"
+    command: celery -A app.tasks worker --loglevel=info --concurrency=2
+    volumes:
+      - ${SPO_DATA_DIR:-../data}:/backup/sharepoint
+      - ${SPO_CONFIG_FILE:-../config/config.json}:/app/config.json
+      - ${SPO_LOG_DIR:-../logs}:/app/logs
+    environment:
+      - TZ=${TZ:-Asia/Jakarta}
+      - CONFIG_PATH=/app/config.json
+    depends_on: [redis, spo-backup]
+    networks: [backup-net]
+
+  celery-beat:
+    image: spo-backup:v4
+    container_name: spo-backup-scheduler
+    restart: unless-stopped
+    user: "${SPO_UID:-1000}:${SPO_GID:-1000}"
+    command: celery -A app.tasks beat --loglevel=info --schedule=/app/celerybeat-schedule
+    volumes:
+      - ${SPO_DATA_DIR:-../data}:/backup/sharepoint
+      - ${SPO_CONFIG_FILE:-../config/config.json}:/app/config.json
+      - ${SPO_LOG_DIR:-../logs}:/app/logs
+    environment:
+      - TZ=${TZ:-Asia/Jakarta}
+      - CONFIG_PATH=/app/config.json
+    depends_on: [redis, spo-backup]
+    networks: [backup-net]
+
+networks:
+  backup-net:
+    driver: bridge
+    name: spo-backup-net

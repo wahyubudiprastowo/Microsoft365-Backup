@@ -1,0 +1,421 @@
+{% extends "base.html" %}
+{% block title %}Tenant Schedules{% endblock %}
+{% block page_title %}<i class="bi bi-clock-history" style="color:var(--primary);"></i> Per-Tenant Schedules & Notifications{% endblock %}
+{% block content %}
+<div class="glass-card mb-4">
+    <div class="card-body">
+        <div style="display:flex;align-items:center;gap:14px;">
+            <div style="width:52px;height:52px;border-radius:14px;background:linear-gradient(135deg,rgba(99,102,241,0.2),rgba(6,182,212,0.15));display:flex;align-items:center;justify-content:center;">
+                <i class="bi bi-clock-history" style="color:var(--accent);font-size:26px;"></i>
+            </div>
+            <div style="flex:1;">
+                <h5 style="margin:0 0 4px;font-weight:700;">Independent Backup Schedules Per Tenant</h5>
+                <p style="color:var(--text-muted);margin:0;font-size:13px;">Each tenant can use its own cron schedule and recipient list without changing the global transport credentials.</p>
+            </div>
+            <button type="button" class="btn-modern btn-ghost-modern" onclick="reloadSchedules()" style="padding:8px 14px;font-size:12px;">
+                <i class="bi bi-arrow-clockwise"></i> Stage Beat Reload
+            </button>
+        </div>
+    </div>
+</div>
+
+<div id="tenantCards">
+    <div style="padding:40px;text-align:center;color:var(--text-muted);">
+        <i class="bi bi-arrow-repeat spin" style="font-size:24px;"></i>
+        <div style="margin-top:10px;">Loading tenants...</div>
+    </div>
+</div>
+
+<div class="modal fade" id="configModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content" style="background:var(--bg-elevated);border:1px solid var(--border);border-radius:16px;position:relative;z-index:2101;pointer-events:auto;">
+            <div class="modal-header" style="border-bottom:1px solid var(--border);">
+                <h5 class="modal-title" style="font-weight:600;">
+                    <i class="bi bi-gear-fill" style="color:var(--accent);"></i>
+                    Configure Tenant: <span id="modalTenantName"></span>
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <ul class="nav nav-tabs" style="border-bottom:1px solid var(--border);margin-bottom:20px;">
+                    <li class="nav-item"><button type="button" class="nav-link active" data-tab="schedule" onclick="switchTab('schedule', this)" style="cursor:pointer;color:var(--text);background:none;border:none;"><i class="bi bi-clock"></i> Schedule</button></li>
+                    <li class="nav-item"><button type="button" class="nav-link" data-tab="email" onclick="switchTab('email', this)" style="cursor:pointer;color:var(--text-muted);background:none;border:none;"><i class="bi bi-envelope"></i> Email</button></li>
+                    <li class="nav-item"><button type="button" class="nav-link" data-tab="telegram" onclick="switchTab('telegram', this)" style="cursor:pointer;color:var(--text-muted);background:none;border:none;"><i class="bi bi-telegram"></i> Telegram</button></li>
+                    <li class="nav-item"><button type="button" class="nav-link" data-tab="teams" onclick="switchTab('teams', this)" style="cursor:pointer;color:var(--text-muted);background:none;border:none;"><i class="bi bi-microsoft-teams"></i> Teams</button></li>
+                </ul>
+
+                <div id="tab-schedule" class="config-tab">
+                    <div class="form-modern">
+                        <div class="d-flex justify-content-between align-items-center mb-3">
+                            <label>Schedule Status</label>
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="schedEnabled" style="width:44px;height:24px;">
+                            </div>
+                        </div>
+                        <label>Cron Expression</label>
+                        <input type="text" id="cronExpr" placeholder="0 2 * * *" style="font-family:'JetBrains Mono',monospace;">
+                        <div class="form-hint" id="cronDesc" style="margin-top:6px;color:var(--warning);">--</div>
+                        <div style="margin-top:14px;">
+                            <div style="font-size:11px;color:var(--text-dim);text-transform:uppercase;font-weight:700;margin-bottom:8px;">Quick Presets</div>
+                            <div class="d-flex flex-wrap gap-2">
+                                <button type="button" onclick="setCron('0 2 * * *')" class="badge-modern badge-info" style="border:1px solid var(--border);cursor:pointer;padding:6px 12px;">Daily 2 AM</button>
+                                <button type="button" onclick="setCron('0 */6 * * *')" class="badge-modern badge-primary" style="border:1px solid var(--border);cursor:pointer;padding:6px 12px;">Every 6h</button>
+                                <button type="button" onclick="setCron('0 0 * * 0')" class="badge-modern badge-warning" style="border:1px solid var(--border);cursor:pointer;padding:6px 12px;">Weekly</button>
+                                <button type="button" onclick="setCron('0 2 1 * *')" class="badge-modern badge-success" style="border:1px solid var(--border);cursor:pointer;padding:6px 12px;">Monthly</button>
+                            </div>
+                        </div>
+                        <label style="margin-top:16px;">Timezone</label>
+                        <input type="text" id="schedTz" value="Asia/Jakarta">
+                    </div>
+                </div>
+
+                <div id="tab-email" class="config-tab" style="display:none;">
+                    <div class="form-modern">
+                        <div class="d-flex justify-content-between align-items-center mb-3">
+                            <label>Email Notifications</label>
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="emailEnabled" style="width:44px;height:24px;">
+                            </div>
+                        </div>
+                        <label>Recipients (one per line)</label>
+                        <textarea id="emailRecipients" rows="5" placeholder="admin@example.com&#10;ops@example.com" style="font-family:'JetBrains Mono',monospace;font-size:13px;"></textarea>
+                    </div>
+                </div>
+
+                <div id="tab-telegram" class="config-tab" style="display:none;">
+                    <div class="form-modern">
+                        <div class="d-flex justify-content-between align-items-center mb-3">
+                            <label>Telegram Notifications</label>
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="tgEnabled" style="width:44px;height:24px;">
+                            </div>
+                        </div>
+                        <label>Chat IDs (one per line)</label>
+                        <textarea id="tgChatIds" rows="4" placeholder="-1001234567890&#10;123456789" style="font-family:'JetBrains Mono',monospace;font-size:13px;"></textarea>
+                    </div>
+                </div>
+
+                <div id="tab-teams" class="config-tab" style="display:none;">
+                    <div class="form-modern">
+                        <div class="d-flex justify-content-between align-items-center mb-3">
+                            <label>Microsoft Teams Notifications</label>
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="teamsEnabled" style="width:44px;height:24px;">
+                            </div>
+                        </div>
+                        <label>Webhook URLs (one per line)</label>
+                        <textarea id="teamsWebhooks" rows="4" placeholder="https://example.webhook.office.com/..." style="font-family:'JetBrains Mono',monospace;font-size:12px;"></textarea>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer" style="border-top:1px solid var(--border);">
+                <button type="button" class="btn-modern btn-ghost-modern" onclick="testNotif()" id="testBtn" style="display:none;">
+                    <i class="bi bi-send"></i> Test
+                </button>
+                <button type="button" class="btn-modern btn-ghost-modern" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn-modern btn-primary-modern" onclick="saveConfig()" id="scheduleSaveBtn">
+                    <i class="bi bi-check-lg"></i> Save
+                </button>
+            </div>
+            <div id="tenantNotifTestResult" style="padding:0 18px 16px;font-size:13px;"></div>
+        </div>
+    </div>
+</div>
+
+<style>
+.tenant-card {
+    padding: 20px;
+    margin-bottom: 14px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 20px;
+    align-items: center;
+}
+.tenant-card:hover { border-color: var(--border-hover); }
+.tenant-info { display: flex; gap: 16px; align-items: center; }
+.tenant-avatar {
+    width: 52px; height: 52px; border-radius: 12px;
+    background: linear-gradient(135deg, var(--primary), var(--accent));
+    display: flex; align-items: center; justify-content: center;
+    color: #fff; font-size: 24px; font-weight: 700;
+}
+.tenant-meta { display: flex; gap: 12px; font-size: 11px; color: var(--text-muted); margin-top: 6px; flex-wrap: wrap; }
+.tenant-meta .item { display: inline-flex; align-items: center; gap: 4px; }
+.status-pill { display: inline-block; padding: 3px 10px; border-radius: 8px; font-size: 11px; font-weight: 600; }
+.status-active { background: rgba(16,185,129,0.15); color: #10b981; }
+.status-off { background: rgba(255,255,255,0.05); color: var(--text-dim); }
+.nav-tabs .nav-link.active { background: transparent; border-bottom: 2px solid var(--primary); color: var(--text) !important; }
+</style>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+let currentTenantId = null;
+let currentTenants = [];
+let scheduleModalInstance = null;
+const CRON_DESC = {
+    '0 2 * * *': 'Daily at 02:00',
+    '0 */6 * * *': 'Every 6 hours',
+    '0 0 * * 0': 'Every Sunday at 00:00',
+    '0 2 1 * *': 'Monthly on day 1 at 02:00',
+};
+
+async function loadTenants() {
+    try {
+        const res = await apiCall('/api/tenants');
+        currentTenants = res.tenants || [];
+        await renderTenantCards();
+    } catch (e) {
+        document.getElementById('tenantCards').innerHTML = `<div style="padding:30px;text-align:center;color:var(--danger);">Error loading tenants: ${e.message}</div>`;
+    }
+}
+
+async function renderTenantCards() {
+    if (!currentTenants.length) {
+        document.getElementById('tenantCards').innerHTML = `<div class="glass-card"><div class="card-body" style="padding:60px;text-align:center;color:var(--text-dim);"><i class="bi bi-building" style="font-size:48px;opacity:0.5;display:block;margin-bottom:10px;"></i>No tenants yet. <a href="/tenants" style="color:var(--accent);">Add one</a> first.</div></div>`;
+        return;
+    }
+
+    let html = '';
+    for (const tenant of currentTenants) {
+        const [sched, notif] = await Promise.all([
+            apiCall(`/api/v2/tenants/${tenant.id}/schedule`).catch(() => ({})),
+            apiCall(`/api/v2/tenants/${tenant.id}/notifications`).catch(() => ({}))
+        ]);
+        const initial = (tenant.name || 'T').charAt(0).toUpperCase();
+        const cron = sched.cron_expression || '(none)';
+        const cronDesc = CRON_DESC[cron] || cron;
+        const emailCount = (notif.email?.recipients || []).length;
+        const tgCount = (notif.telegram?.chat_ids || []).length;
+        const teamsCount = (notif.teams?.webhook_urls || []).length;
+        const safeName = String(tenant.name || '').replaceAll("'", "\\'");
+
+        html += `
+        <div class="tenant-card">
+            <div class="tenant-info">
+                <div class="tenant-avatar">${initial}</div>
+                <div>
+                    <div style="font-weight:700;font-size:16px;">${escapeHtml(tenant.name || '')}</div>
+                    <div style="font-size:12px;color:var(--text-dim);">${escapeHtml(tenant.primary_domain || tenant.tenant_id || '')}</div>
+                    <div class="tenant-meta">
+                        <span class="item"><i class="bi bi-clock"></i><span class="status-pill ${sched.enabled ? 'status-active' : 'status-off'}">${sched.enabled ? escapeHtml(cronDesc) : 'Schedule Off'}</span></span>
+                        <span class="item"><i class="bi bi-envelope"></i><span class="status-pill ${(notif.email?.enabled && emailCount) ? 'status-active' : 'status-off'}">${emailCount ? emailCount + ' email' : 'no email'}</span></span>
+                        <span class="item"><i class="bi bi-telegram"></i><span class="status-pill ${(notif.telegram?.enabled && tgCount) ? 'status-active' : 'status-off'}">${tgCount ? tgCount + ' chat' : 'no TG'}</span></span>
+                        <span class="item"><i class="bi bi-microsoft-teams"></i><span class="status-pill ${(notif.teams?.enabled && teamsCount) ? 'status-active' : 'status-off'}">${teamsCount ? teamsCount + ' hook' : 'no Teams'}</span></span>
+                    </div>
+                </div>
+            </div>
+            <div class="d-flex gap-2">
+                <button type="button" class="btn-modern btn-ghost-modern" onclick="openConfig('${tenant.id}','${safeName}')" style="padding:8px 14px;font-size:12px;">
+                    <i class="bi bi-gear"></i> Configure
+                </button>
+            </div>
+        </div>`;
+    }
+    document.getElementById('tenantCards').innerHTML = html;
+}
+
+function ensureScheduleModal() {
+    const modalEl = document.getElementById('configModal');
+    if (!modalEl.dataset.movedToBody) {
+        document.body.appendChild(modalEl);
+        modalEl.dataset.movedToBody = '1';
+        modalEl.addEventListener('shown.bs.modal', () => {
+            const firstInput = document.getElementById('cronExpr');
+            if (firstInput) {
+                firstInput.focus();
+                firstInput.select();
+            }
+        });
+    }
+    if (!scheduleModalInstance) {
+        scheduleModalInstance = new bootstrap.Modal(modalEl, {
+            backdrop: true,
+            focus: true,
+            keyboard: true,
+        });
+    }
+    return scheduleModalInstance;
+}
+
+async function openConfig(tenantId, tenantName) {
+    currentTenantId = tenantId;
+    document.getElementById('modalTenantName').textContent = tenantName;
+    const [sched, notif] = await Promise.all([
+        apiCall(`/api/v2/tenants/${tenantId}/schedule`),
+        apiCall(`/api/v2/tenants/${tenantId}/notifications`)
+    ]);
+    document.getElementById('schedEnabled').checked = sched.enabled || false;
+    document.getElementById('cronExpr').value = sched.cron_expression || '0 2 * * *';
+    document.getElementById('schedTz').value = sched.timezone || 'Asia/Jakarta';
+    document.getElementById('emailEnabled').checked = notif.email?.enabled || false;
+    document.getElementById('emailRecipients').value = (notif.email?.recipients || []).join('\n');
+    document.getElementById('tgEnabled').checked = notif.telegram?.enabled || false;
+    document.getElementById('tgChatIds').value = (notif.telegram?.chat_ids || []).join('\n');
+    document.getElementById('teamsEnabled').checked = notif.teams?.enabled || false;
+    document.getElementById('teamsWebhooks').value = (notif.teams?.webhook_urls || []).join('\n');
+    updateCronDesc();
+    switchTab('schedule', document.querySelector('[data-tab="schedule"]'));
+    ensureScheduleModal().show();
+}
+
+function switchTab(tabName, el) {
+    document.querySelectorAll('.config-tab').forEach(tab => tab.style.display = 'none');
+    document.querySelectorAll('.nav-tabs .nav-link').forEach(link => {
+        link.classList.remove('active');
+        link.style.color = 'var(--text-muted)';
+    });
+    document.getElementById(`tab-${tabName}`).style.display = 'block';
+    el.classList.add('active');
+    el.style.color = 'var(--text)';
+    document.getElementById('testBtn').style.display = tabName === 'schedule' ? 'none' : 'inline-flex';
+}
+
+function setCron(expr) {
+    document.getElementById('cronExpr').value = expr;
+    updateCronDesc();
+}
+
+function updateCronDesc() {
+    const expr = document.getElementById('cronExpr').value.trim();
+    document.getElementById('cronDesc').textContent = CRON_DESC[expr] || `Custom: ${expr}`;
+}
+
+async function saveConfig(options = {}) {
+    if (!currentTenantId) return false;
+    const keepOpen = options.keepOpen === true;
+    const silent = options.silent === true;
+    const saveBtn = document.getElementById('scheduleSaveBtn');
+    const original = saveBtn.innerHTML;
+    saveBtn.disabled = true;
+    saveBtn.innerHTML = '<i class="bi bi-arrow-repeat spin"></i> Saving...';
+    const scheduleData = {
+        enabled: document.getElementById('schedEnabled').checked,
+        cron_expression: document.getElementById('cronExpr').value.trim(),
+        timezone: document.getElementById('schedTz').value.trim() || 'Asia/Jakarta',
+    };
+    const notifData = {
+        email: {
+            enabled: document.getElementById('emailEnabled').checked,
+            recipients: document.getElementById('emailRecipients').value.split('\n').map(v => v.trim()).filter(Boolean),
+        },
+        telegram: {
+            enabled: document.getElementById('tgEnabled').checked,
+            chat_ids: document.getElementById('tgChatIds').value.split('\n').map(v => v.trim()).filter(Boolean),
+        },
+        teams: {
+            enabled: document.getElementById('teamsEnabled').checked,
+            webhook_urls: document.getElementById('teamsWebhooks').value.split('\n').map(v => v.trim()).filter(Boolean),
+        }
+    };
+    try {
+        const [r1, r2] = await Promise.all([
+            apiCall(`/api/v2/tenants/${currentTenantId}/schedule`, 'POST', scheduleData),
+            apiCall(`/api/v2/tenants/${currentTenantId}/notifications`, 'POST', notifData),
+        ]);
+        saveBtn.disabled = false;
+        saveBtn.innerHTML = original;
+        if (r1.error || r2.error) {
+            if (!silent) showToast(r1.error || r2.error, 'error');
+            return false;
+        }
+        if (!silent) showToast('Configuration saved', 'success');
+        if (!keepOpen) {
+            const modal = bootstrap.Modal.getInstance(document.getElementById('configModal'));
+            if (modal) modal.hide();
+        }
+        await loadTenants();
+        return true;
+    } catch (e) {
+        saveBtn.disabled = false;
+        saveBtn.innerHTML = original;
+        if (!silent) showToast('Error: ' + e.message, 'error');
+        return false;
+    }
+}
+
+async function testNotif() {
+    if (!currentTenantId) return;
+    const btn = document.getElementById('testBtn');
+    const resultBox = document.getElementById('tenantNotifTestResult');
+    const original = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="bi bi-arrow-repeat spin"></i> Testing...';
+    resultBox.innerHTML = '<div style="color:var(--text-muted);"><i class="bi bi-arrow-repeat spin"></i> Saving config and sending test notification...</div>';
+    const ok = await saveConfig({ keepOpen: true, silent: true });
+    if (!ok) {
+        btn.disabled = false;
+        btn.innerHTML = original;
+        resultBox.innerHTML = '<div style="color:var(--danger);"><i class="bi bi-x-circle-fill"></i> Failed to save tenant configuration before test.</div>';
+        showToast('Failed to save configuration before test', 'error');
+        return;
+    }
+    try {
+        showToast('Sending test notification...', 'info');
+        const res = await apiCall(`/api/v2/tenants/${currentTenantId}/notifications/test`, 'POST');
+        btn.disabled = false;
+        btn.innerHTML = original;
+        if (res.error) {
+            resultBox.innerHTML = `<div style="color:var(--danger);"><i class="bi bi-x-circle-fill"></i> ${escapeHtml(res.error)}</div>`;
+            showToast(res.error || 'Failed', 'error');
+            return;
+        }
+        const results = Array.isArray(res.result) ? res.result : [];
+        if (!results.length) {
+            resultBox.innerHTML = '<div style="color:var(--warning);"><i class="bi bi-exclamation-triangle-fill"></i> No notification channels were executed.</div>';
+            showToast('No channel executed', 'warning');
+            return;
+        }
+        const summaryTone = res.status === 'failed' ? 'var(--danger)' : res.status === 'partial' ? 'var(--warning)' : 'var(--success)';
+        let html = `<div style="border:1px solid var(--border);border-radius:10px;padding:12px;background:rgba(255,255,255,0.03);">
+            <div style="font-weight:700;color:${summaryTone};margin-bottom:8px;">Test Result: ${escapeHtml(String(res.status || 'sent').toUpperCase())}</div>`;
+        html += '<div style="display:grid;gap:6px;">';
+        results.forEach(item => {
+            const ok = !!item.success;
+            html += `<div style="padding:8px 10px;border-radius:8px;background:${ok ? 'rgba(16,185,129,0.08)' : 'rgba(239,68,68,0.08)'};color:${ok ? 'var(--success)' : 'var(--danger)'};">
+                <strong>${ok ? 'OK' : 'FAILED'}</strong> — ${escapeHtml(item.channel || 'channel')}: ${escapeHtml(item.message || '')}
+            </div>`;
+        });
+        html += '</div></div>';
+        resultBox.innerHTML = html;
+        if (res.status === 'sent') showToast('All tested channels succeeded', 'success');
+        else if (res.status === 'partial') showToast('Some notification channels failed', 'warning');
+        else showToast('Notification test failed', 'error');
+    } catch (e) {
+        btn.disabled = false;
+        btn.innerHTML = original;
+        resultBox.innerHTML = `<div style="color:var(--danger);"><i class="bi bi-x-circle-fill"></i> ${escapeHtml(e.message)}</div>`;
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+async function reloadSchedules() {
+    try {
+        const res = await apiCall('/api/v2/schedules/reload', 'POST');
+        if (res.status === 'reload_staged') showToast(`Staged ${res.active_schedules.length} schedule(s). Restart celery-beat to apply them for real.`, 'warning');
+        else showToast(res.error || 'Failed', 'error');
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+function escapeHtml(value) {
+    return String(value)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    ensureScheduleModal();
+    const cron = document.getElementById('cronExpr');
+    if (cron) cron.addEventListener('input', updateCronDesc);
+    loadTenants();
+});
+</script>
+{% endblock %}

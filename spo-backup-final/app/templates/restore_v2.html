@@ -1,0 +1,412 @@
+{% extends "base.html" %}
+{% block title %}Restore{% endblock %}
+{% block page_title %}<i class="bi bi-arrow-counterclockwise" style="color:var(--primary);"></i> Restore{% endblock %}
+{% block content %}
+<div class="glass-card mb-4" style="border-color:rgba(6,182,212,0.22);">
+    <div class="card-body" style="display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap;">
+        <div style="width:44px;height:44px;border-radius:12px;background:rgba(6,182,212,0.12);display:flex;align-items:center;justify-content:center;color:var(--accent);font-size:22px;">
+            <i class="bi bi-arrow-repeat"></i>
+        </div>
+        <div style="flex:1;min-width:260px;">
+            <div style="font-weight:700;font-size:15px;">Restore V2 Is The Main Restore Flow</div>
+            <div style="color:var(--text-muted);font-size:13px;margin-top:4px;">
+                Gunakan halaman ini untuk restore tenant-aware multi-workload. Route restore lama sudah diarahkan ke sini agar operator tidak lagi berpindah antara dua flow restore.
+            </div>
+        </div>
+    </div>
+</div>
+<div class="row g-4">
+    <div class="col-lg-5">
+        <div class="glass-card">
+            <div class="card-header">
+                <h6><i class="bi bi-plus-circle-fill" style="color:var(--accent);"></i> New Restore Job</h6>
+            </div>
+            <div class="card-body">
+                <div class="form-modern">
+                    <div class="mb-3">
+                        <label>Tenant</label>
+                        <select id="rTenant" onchange="onTenantChange()">
+                            <option value="">Select tenant...</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label>Workload</label>
+                        <div class="workload-picker">
+                            <button type="button" class="workload-btn" onclick="selectWorkload('sharepoint', this)"><i class="bi bi-cloud-fill"></i> SharePoint</button>
+                            <button type="button" class="workload-btn" onclick="selectWorkload('onedrive', this)"><i class="bi bi-hdd-fill"></i> OneDrive</button>
+                            <button type="button" class="workload-btn" onclick="selectWorkload('outlook', this)"><i class="bi bi-envelope-fill"></i> Outlook</button>
+                            <button type="button" class="workload-btn" onclick="selectWorkload('teams', this)"><i class="bi bi-microsoft-teams"></i> Teams</button>
+                        </div>
+                        <div id="workloadReadiness" class="form-hint" style="margin-top:8px;">
+                            Select a workload to see restore readiness and requirements
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <label>Source Backup</label>
+                        <select id="rBackup" onchange="document.getElementById('previewResult').style.display = 'none'">
+                            <option value="">Select backup...</option>
+                        </select>
+                        <div class="form-hint" id="backupInfo" style="margin-top:6px;">Select tenant and workload first</div>
+                    </div>
+                    <div class="mb-3">
+                        <label>Restore Mode</label>
+                        <div class="mode-picker">
+                            <button type="button" class="mode-btn" onclick="selectMode('overwrite', this)">Overwrite</button>
+                            <button type="button" class="mode-btn active" onclick="selectMode('merge', this)">Merge</button>
+                            <button type="button" class="mode-btn" onclick="selectMode('new_location', this)">New Location</button>
+                        </div>
+                        <div class="form-hint" id="modeHint" style="margin-top:6px;color:var(--accent);">
+                            <i class="bi bi-info-circle"></i> Merge: Only add missing items, skip existing
+                        </div>
+                    </div>
+
+                    <div id="spOptions" class="workload-options" style="display:none;">
+                        <div class="mb-3">
+                            <label>Target Site Path</label>
+                            <input type="text" id="rTargetSite" placeholder="sites/BackupRestore" style="font-family:'JetBrains Mono',monospace;">
+                        </div>
+                    </div>
+
+                    <div id="odOptions" class="workload-options" style="display:none;">
+                        <div class="mb-3">
+                            <label>Target Folder in OneDrive</label>
+                            <input type="text" id="rTargetFolder" value="M365 Restored" placeholder="M365 Restored">
+                        </div>
+                        <div class="mb-3">
+                            <label>User Mapping (JSON)</label>
+                            <textarea id="rUserMappingOD" rows="3" placeholder='{"old@company.com": "new@company.com"}' style="font-family:'JetBrains Mono',monospace;font-size:12px;"></textarea>
+                        </div>
+                    </div>
+
+                    <div id="olOptions" class="workload-options" style="display:none;">
+                        <div class="mb-3">
+                            <label>Items to Restore</label>
+                            <div style="display:flex;gap:14px;flex-wrap:wrap;">
+                                <label class="check-label"><input type="checkbox" id="itemMessages" checked> Messages</label>
+                                <label class="check-label"><input type="checkbox" id="itemCalendar" checked> Calendar</label>
+                                <label class="check-label"><input type="checkbox" id="itemContacts" checked> Contacts</label>
+                            </div>
+                        </div>
+                        <div class="mb-3">
+                            <label>User Mapping (JSON)</label>
+                            <textarea id="rUserMappingOL" rows="3" placeholder='{"old@company.com": "new@company.com"}' style="font-family:'JetBrains Mono',monospace;font-size:12px;"></textarea>
+                        </div>
+                    </div>
+
+                    <div id="teamsOptions" class="workload-options" style="display:none;">
+                        <div class="mb-3">
+                            <label>Export Format</label>
+                            <select id="rTeamsFormat">
+                                <option value="all">HTML + JSON + TXT</option>
+                                <option value="html">HTML only</option>
+                                <option value="json">JSON only</option>
+                                <option value="txt">TXT only</option>
+                            </select>
+                            <div class="form-hint" style="margin-top:6px;">Teams restore exports a browseable archive. It does not re-import messages to Teams.</div>
+                        </div>
+                        <div class="mb-3">
+                            <label>Export Directory Override (optional)</label>
+                            <input type="text" id="rTeamsExportDir" placeholder="/backup/sharepoint/m365/tenant/teams-exports/custom-run" style="font-family:'JetBrains Mono',monospace;">
+                        </div>
+                    </div>
+
+                    <div class="d-flex gap-2">
+                        <button class="btn-modern btn-ghost-modern" onclick="previewRestore()" style="flex:1;justify-content:center;">
+                            <i class="bi bi-eye"></i> Preview
+                        </button>
+                        <button class="btn-modern btn-primary-modern" onclick="startRestore()" style="flex:1;justify-content:center;">
+                            <i class="bi bi-play-fill"></i> Start Restore
+                        </button>
+                    </div>
+
+                    <div id="previewResult" style="display:none;margin-top:14px;background:rgba(6,182,212,0.05);border:1px solid rgba(6,182,212,0.2);border-radius:10px;padding:14px;">
+                        <div style="font-weight:700;margin-bottom:8px;"><i class="bi bi-eye-fill" style="color:var(--accent);"></i> Dry Run Preview</div>
+                        <div id="previewWarning" style="display:none;margin-bottom:10px;padding:10px 12px;border-radius:8px;background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.25);color:#fbbf24;font-size:12px;"></div>
+                        <div id="previewContent" style="font-size:12px;font-family:'JetBrains Mono',monospace;"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-lg-7">
+        <div class="glass-card">
+            <div class="card-header">
+                <h6><i class="bi bi-list-task" style="color:var(--primary);"></i> Restore Jobs</h6>
+                <button class="btn-modern btn-ghost-modern" onclick="refreshJobs()" style="padding:6px 12px;font-size:12px;">
+                    <i class="bi bi-arrow-clockwise"></i> Refresh
+                </button>
+            </div>
+            <div class="card-body" id="jobsContainer" style="padding:14px;max-height:700px;overflow-y:auto;">
+                <div style="padding:40px;text-align:center;color:var(--text-muted);">
+                    <i class="bi bi-arrow-repeat spin" style="font-size:24px;"></i>
+                    <div style="margin-top:10px;">Loading jobs...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+.workload-picker, .mode-picker { display:grid; grid-template-columns:repeat(4, 1fr); gap:8px; margin-top:6px; }
+.workload-btn, .mode-btn {
+    padding:12px 14px; background:rgba(255,255,255,0.04); border:1px solid var(--border);
+    border-radius:10px; color:var(--text); font-weight:600; font-size:13px; cursor:pointer; transition:all 0.2s;
+}
+.workload-btn:hover, .mode-btn:hover { background:rgba(99,102,241,0.1); border-color:var(--border-hover); }
+.workload-btn.active, .mode-btn.active {
+    background:linear-gradient(135deg, var(--primary), var(--primary-hover));
+    border-color:var(--primary); color:#fff; box-shadow:0 4px 16px rgba(99,102,241,0.3);
+}
+.check-label { display:inline-flex; align-items:center; gap:6px; font-size:13px; cursor:pointer; color:var(--text); }
+.job-card { padding:14px; background:rgba(255,255,255,0.02); border:1px solid var(--border); border-radius:12px; margin-bottom:10px; }
+.wl-badge {
+    display:inline-block; padding:2px 8px; border-radius:6px; font-size:10px; font-weight:700; text-transform:uppercase;
+    letter-spacing:0.5px; background:rgba(0,120,212,0.15); color:#4da3e0; margin-right:6px;
+}
+</style>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+let selectedWorkload = null;
+let selectedMode = 'merge';
+let currentTenants = [];
+let currentBackups = [];
+const workloadHints = {
+    sharepoint: 'SharePoint restore needs a target site path or site ID. Use Preview first to validate the backup and target.',
+    onedrive: 'OneDrive restore writes files back through Microsoft Graph. Ensure tenant app permissions and admin consent are complete.',
+    outlook: 'Outlook restore currently supports messages, calendar, and contacts. Preview helps verify the backup contents before execution.',
+    teams: 'Teams restore is export-only. It generates HTML/JSON/TXT output and does not re-import messages into Microsoft Teams.'
+};
+
+async function loadTenants() {
+    const res = await apiCall('/api/tenants');
+    currentTenants = res.tenants || [];
+    const sel = document.getElementById('rTenant');
+    sel.innerHTML = '<option value="">Select tenant...</option>' +
+        currentTenants.map(t => `<option value="${t.id}">${escapeHtml(t.name)}</option>`).join('');
+}
+
+function onTenantChange() {
+    document.getElementById('rBackup').innerHTML = '<option value="">Select backup...</option>';
+    if (selectedWorkload) loadBackups();
+}
+
+function selectWorkload(workload, btn) {
+    selectedWorkload = workload;
+    document.querySelectorAll('.workload-btn').forEach(el => el.classList.remove('active'));
+    btn.classList.add('active');
+    document.querySelectorAll('.workload-options').forEach(el => el.style.display = 'none');
+    if (workload === 'sharepoint') document.getElementById('spOptions').style.display = 'block';
+    if (workload === 'onedrive') document.getElementById('odOptions').style.display = 'block';
+    if (workload === 'outlook') document.getElementById('olOptions').style.display = 'block';
+    if (workload === 'teams') document.getElementById('teamsOptions').style.display = 'block';
+    document.getElementById('workloadReadiness').textContent = workloadHints[workload] || '';
+    document.getElementById('previewResult').style.display = 'none';
+    loadBackups();
+}
+
+function selectMode(mode, btn) {
+    selectedMode = mode;
+    document.querySelectorAll('.mode-btn').forEach(el => el.classList.remove('active'));
+    btn.classList.add('active');
+    const hints = {
+        overwrite: 'Overwrite: Replace existing items with backup version',
+        merge: 'Merge: Only add missing items, skip existing',
+        new_location: 'New Location: Restore to a different target',
+    };
+    document.getElementById('modeHint').innerHTML = `<i class="bi bi-info-circle"></i> ${hints[mode]}`;
+}
+
+async function loadBackups() {
+    const tenantId = document.getElementById('rTenant').value;
+    if (!tenantId || !selectedWorkload) return;
+    const tenant = currentTenants.find(t => t.id === tenantId);
+    if (!tenant) return;
+    const slug = tenant.tenant_slug || '';
+    if (!slug) {
+        showToast('Tenant slug missing from API response', 'error');
+        return;
+    }
+    const res = await apiCall(`/api/v2/backups?refresh=1&tenant_slug=${encodeURIComponent(slug)}&workload=${encodeURIComponent(selectedWorkload)}`);
+    currentBackups = res.backups || [];
+    const sel = document.getElementById('rBackup');
+    if (!currentBackups.length) {
+        sel.innerHTML = '<option value="">No backups found</option>';
+        document.getElementById('backupInfo').textContent = `No ${selectedWorkload} backups for this tenant`;
+        return;
+    }
+    sel.innerHTML = '<option value="">Select backup...</option>' +
+        currentBackups.map(b => `<option value="${escapeAttr(b.backup_path)}" data-name="${escapeAttr(b.backup_name)}">${escapeHtml(b.backup_name)} · ${escapeHtml(b.date)} · ${escapeHtml(b.size_human)}${(b.files_count || b.targets_count) ? '' : ' · empty/metadata only'}</option>`).join('');
+    document.getElementById('backupInfo').textContent = `${currentBackups.length} backup(s) found`;
+}
+
+function buildConfig() {
+    const tenantId = document.getElementById('rTenant').value;
+    const backupPath = document.getElementById('rBackup').value;
+    if (!tenantId) { showToast('Select tenant', 'warning'); return null; }
+    if (!selectedWorkload) { showToast('Select workload', 'warning'); return null; }
+    if (!backupPath) { showToast('Select backup', 'warning'); return null; }
+    const tenant = currentTenants.find(t => t.id === tenantId);
+    const backup = currentBackups.find(b => b.backup_path === backupPath);
+    const config = {
+        tenant_id: tenantId,
+        tenant_name: tenant.name,
+        workload: selectedWorkload,
+        backup_path: backupPath,
+        source_backup: backup ? backup.backup_name : '',
+        mode: selectedMode,
+    };
+    if (selectedWorkload === 'sharepoint') {
+        config.target_site_path = document.getElementById('rTargetSite').value.trim();
+    } else if (selectedWorkload === 'onedrive') {
+        config.target_folder = document.getElementById('rTargetFolder').value.trim() || 'M365 Restored';
+        try {
+            const mapping = document.getElementById('rUserMappingOD').value.trim();
+            config.user_mapping = mapping ? JSON.parse(mapping) : {};
+        } catch (e) {
+            showToast('Invalid OneDrive mapping JSON: ' + e.message, 'error');
+            return null;
+        }
+    } else if (selectedWorkload === 'outlook') {
+        const items = [];
+        if (document.getElementById('itemMessages').checked) items.push('messages');
+        if (document.getElementById('itemCalendar').checked) items.push('calendar');
+        if (document.getElementById('itemContacts').checked) items.push('contacts');
+        if (!items.length) { showToast('Select at least one Outlook item type', 'warning'); return null; }
+        config.restore_items = items;
+        try {
+            const mapping = document.getElementById('rUserMappingOL').value.trim();
+            config.user_mapping = mapping ? JSON.parse(mapping) : {};
+        } catch (e) {
+            showToast('Invalid Outlook mapping JSON: ' + e.message, 'error');
+            return null;
+        }
+    } else if (selectedWorkload === 'teams') {
+        config.export_format = document.getElementById('rTeamsFormat').value;
+        const exportDir = document.getElementById('rTeamsExportDir').value.trim();
+        if (exportDir) config.export_dir = exportDir;
+    }
+    return config;
+}
+
+async function previewRestore() {
+    const config = buildConfig();
+    if (!config) return;
+    const res = await apiCall('/api/v2/restore/preview', 'POST', config);
+    if (res.error) { showToast(res.error, 'error'); return; }
+    const warnings = [];
+    const permission = res.permission_preflight || {};
+    if (!res.files_to_upload && !res.messages_in_backup && !res.channels_in_backup && !res.teams_in_backup && !res.users_in_backup) {
+        warnings.push('Backup appears empty or contains metadata only. Verify the selected backup before starting restore.');
+    }
+    if (selectedWorkload === 'teams') {
+        warnings.push('Teams restore exports backup content only. Native message re-import is not supported by this flow.');
+    }
+    if (selectedWorkload === 'sharepoint' && !config.target_site_path && !config.target_site_id) {
+        warnings.push('SharePoint restore requires a target site path or site ID.');
+    }
+    if (permission.ready === false) {
+        const scopes = Array.isArray(permission.required_scopes) && permission.required_scopes.length
+            ? ` Required scopes: ${permission.required_scopes.join(', ')}.`
+            : '';
+        warnings.push(`${permission.message || 'Tenant permission readiness check failed.'}${scopes}`);
+    }
+    const html = Object.entries(res).map(([k, v]) => {
+        const value = typeof v === 'number'
+            ? v.toLocaleString()
+            : (typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v));
+        return `<div><b>${escapeHtml(k)}:</b> ${escapeHtml(value)}</div>`;
+    }).join('');
+    document.getElementById('previewWarning').innerHTML = warnings.join('<br>');
+    document.getElementById('previewWarning').style.display = warnings.length ? 'block' : 'none';
+    document.getElementById('previewContent').innerHTML = html;
+    document.getElementById('previewResult').style.display = 'block';
+}
+
+async function startRestore() {
+    const config = buildConfig();
+    if (!config) return;
+    if (!confirm(`Start restore?\n\nWorkload: ${config.workload}\nSource: ${config.source_backup}\nMode: ${config.mode}`)) return;
+    const res = await apiCall('/api/v2/restore/jobs', 'POST', config);
+    if (res.status === 'created') {
+        showToast(`Restore job created: ${res.job.id.substring(0, 8)}`, 'success');
+        setTimeout(refreshJobs, 800);
+    } else {
+        showToast(res.error || 'Failed', 'error');
+    }
+}
+
+async function refreshJobs() {
+    const res = await apiCall('/api/v2/restore/jobs');
+    const jobs = res.jobs || [];
+    const container = document.getElementById('jobsContainer');
+    if (!jobs.length) {
+        container.innerHTML = `<div style="padding:40px;text-align:center;color:var(--text-dim);"><i class="bi bi-inbox" style="font-size:48px;opacity:0.5;display:block;margin-bottom:10px;"></i>No restore jobs yet</div>`;
+        return;
+    }
+    const colors = {completed:'var(--success)', running:'var(--primary)', failed:'var(--danger)', queued:'var(--warning)', cancelled:'var(--text-dim)', paused:'#a855f7'};
+    container.innerHTML = jobs.map(j => {
+        const c = colors[j.status] || 'var(--text-dim)';
+        const canCancel = ['queued', 'running', 'paused'].includes(j.status);
+        const canDelete = ['completed', 'failed', 'cancelled'].includes(j.status);
+        return `<div class="job-card">
+            <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:8px;">
+                <div style="flex:1;">
+                    <div style="font-weight:700;font-size:14px;"><span class="wl-badge">${escapeHtml(j.workload)}</span>${escapeHtml(j.tenant_name || 'Unknown tenant')}</div>
+                    <div style="font-size:11px;color:var(--text-muted);font-family:'JetBrains Mono',monospace;margin-top:2px;">${escapeHtml(j.source_backup || '')} · mode: ${escapeHtml(j.mode || '')}</div>
+                    ${j.current_target ? `<div style="font-size:11px;color:var(--text-dim);margin-top:2px;">→ ${escapeHtml(j.current_target)}</div>` : ''}
+                </div>
+                <span class="badge-modern" style="background:${c}1A;color:${c};">${escapeHtml((j.status || '').replace(/^./, s => s.toUpperCase()))}</span>
+            </div>
+            <div style="margin-top:10px;">
+                <div style="height:8px;background:rgba(255,255,255,0.05);border-radius:4px;overflow:hidden;">
+                    <div style="height:100%;background:linear-gradient(90deg,var(--primary),var(--accent));width:${j.progress||0}%;border-radius:4px;transition:width 0.4s;"></div>
+                </div>
+                <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-muted);margin-top:6px;">
+                    <span>Started: ${escapeHtml(j.started_at ? j.started_at.substring(0,19) : '—')}</span>
+                    <span style="color:${c};font-weight:600;">${j.progress||0}%</span>
+                </div>
+                ${j.error ? `<div style="margin-top:6px;color:var(--danger);font-size:11px;">${escapeHtml(j.error)}</div>` : ''}
+            </div>
+            <div style="margin-top:10px;display:flex;gap:6px;">
+                ${canCancel ? `<button class="btn-modern btn-ghost-modern" onclick="cancelJob('${j.id}')" style="padding:4px 10px;font-size:11px;"><i class="bi bi-x"></i> Cancel</button>` : ''}
+                ${canDelete ? `<button class="btn-modern btn-danger-modern" onclick="deleteJob('${j.id}')" style="padding:4px 10px;font-size:11px;"><i class="bi bi-trash"></i> Delete</button>` : ''}
+            </div>
+        </div>`;
+    }).join('');
+}
+
+async function cancelJob(jobId) {
+    if (!confirm('Cancel this restore job?')) return;
+    await apiCall(`/api/v2/restore/jobs/${jobId}/cancel`, 'POST');
+    showToast('Job cancelled', 'info');
+    refreshJobs();
+}
+
+async function deleteJob(jobId) {
+    if (!confirm('Delete this job from history?')) return;
+    const res = await fetch(`/api/v2/restore/jobs/${jobId}`, {method:'DELETE'});
+    const data = await res.json();
+    if (res.ok) {
+        showToast('Job deleted', 'success');
+        refreshJobs();
+    } else {
+        showToast(data.error || 'Failed', 'error');
+    }
+}
+
+function escapeHtml(value) {
+    return String(value).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'", '&#39;');
+}
+
+function escapeAttr(value) {
+    return String(value).replaceAll('"', '&quot;');
+}
+
+loadTenants();
+refreshJobs();
+setInterval(refreshJobs, 4000);
+</script>
+{% endblock %}

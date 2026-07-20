@@ -1,0 +1,498 @@
+{% extends "base.html" %}
+{% block title %}Download{% endblock %}
+{% block page_title %}<i class="bi bi-cloud-download-fill" style="color:var(--accent);"></i> Custom Download{% endblock %}
+{% block content %}
+<div class="glass-card mb-4" style="background:linear-gradient(135deg,rgba(99,102,241,0.1),rgba(6,182,212,0.08));border-color:var(--border-hover);">
+    <div class="card-body">
+        <div class="row align-items-center g-4">
+            <div class="col-md-2 text-center">
+                <div style="width:80px;height:80px;border-radius:20px;background:linear-gradient(135deg,var(--primary),var(--accent));display:inline-flex;align-items:center;justify-content:center;font-size:36px;color:#fff;box-shadow:0 12px 32px rgba(99,102,241,0.4);">
+                    <i class="bi bi-cloud-download-fill"></i>
+                </div>
+            </div>
+            <div class="col-md-10">
+                <h3 style="margin:0 0 6px;font-weight:700;letter-spacing:-0.02em;">Custom SharePoint Download</h3>
+                <p style="color:var(--text-muted);margin:0;font-size:14px;line-height:1.6;">
+                    Paste URL, pilih lokasi penyimpanan, dan kontrol download dengan <b style="color:var(--primary);">Pause / Resume / Cancel</b>.
+                </p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="glass-card mb-4">
+    <div class="card-header"><h6><i class="bi bi-link-45deg" style="color:var(--accent);"></i> Download Configuration</h6></div>
+    <div class="card-body">
+        <div class="form-modern">
+            <label>SharePoint URL</label>
+            <div style="position:relative;margin-bottom:18px;">
+                <input type="url" id="urlInput" placeholder="https://digiservebytelkom.sharepoint.com/sites/BIRATEAM/Shared%20Documents/..." style="padding-right:120px;font-family:'JetBrains Mono',monospace;font-size:13px;">
+                <button type="button" class="btn-modern btn-ghost-modern" onclick="parseUrl()" style="position:absolute;right:6px;top:50%;transform:translateY(-50%);padding:6px 14px;font-size:12px;"><i class="bi bi-search"></i> Preview</button>
+            </div>
+
+            <label><i class="bi bi-folder-fill" style="color:var(--warning);margin-right:4px;"></i> Destination Path <span style="color:var(--text-dim);font-weight:normal;font-size:11px;margin-left:6px;">(optional)</span></label>
+            <div style="position:relative;margin-bottom:8px;">
+                <input type="text" id="destPath" placeholder="my-project-x atau /backup/sharepoint/my-project-x" style="padding-right:120px;font-family:'JetBrains Mono',monospace;font-size:13px;">
+                <button type="button" class="btn-modern btn-ghost-modern" onclick="openPathPicker()" style="position:absolute;right:6px;top:50%;transform:translateY(-50%);padding:6px 12px;font-size:12px;"><i class="bi bi-folder2-open"></i> Browse</button>
+            </div>
+            <div class="form-hint" style="margin-bottom:18px;">
+                <i class="bi bi-info-circle"></i> Default backup root: <code>{{ config.backup.root_dir }}</code>
+            </div>
+            <div style="margin-bottom:18px;background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.2);border-radius:10px;padding:12px 14px;font-size:13px;color:var(--text-muted);">
+                <i class="bi bi-arrow-repeat" style="color:var(--success);"></i>
+                Reuse the same destination path to continue an interrupted download. Completed files will be skipped, and partial <code>.tmp</code> files will be resumed when possible.
+            </div>
+
+            <div id="urlPreviewCard" style="display:none;margin-bottom:18px;">
+                <div style="background:rgba(6,182,212,0.05);border:1px solid rgba(6,182,212,0.2);border-radius:12px;padding:16px;">
+                    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+                        <i class="bi bi-check-circle-fill" style="color:var(--accent);font-size:20px;"></i>
+                        <strong>URL Parsed Successfully</strong>
+                    </div>
+                    <div class="row g-2" style="font-size:13px;">
+                        <div class="col-md-4"><span style="color:var(--text-dim);">Host:</span> <code id="prevHost"></code></div>
+                        <div class="col-md-4"><span style="color:var(--text-dim);">Site:</span> <code id="prevSite"></code></div>
+                        <div class="col-md-4"><span style="color:var(--text-dim);">Folder:</span> <code id="prevFolder"></code></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="d-flex justify-content-end gap-2">
+                <button type="button" class="btn-modern btn-ghost-modern" onclick="clearForm()"><i class="bi bi-x-circle"></i> Clear</button>
+                <button type="button" class="btn-modern btn-primary-modern" onclick="startDownload()" id="downloadBtn"><i class="bi bi-cloud-download-fill"></i> Start Download</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="glass-card mb-4" id="progressPanel" style="display:none;">
+    <div class="card-header">
+        <h6><i class="bi bi-arrow-repeat spin" id="statusIcon" style="color:var(--accent);"></i> <span id="statusTitle">Download in Progress</span></h6>
+        <span class="badge-modern badge-info" id="progressState">RUNNING</span>
+    </div>
+    <div class="card-body">
+        <div style="background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.2);border-radius:10px;padding:10px 14px;margin-bottom:18px;display:flex;align-items:center;gap:10px;">
+            <i class="bi bi-folder-fill" style="color:var(--warning);"></i>
+            <span style="font-size:12px;color:var(--text-muted);">Saving to:</span>
+            <code id="destPathDisplay" style="font-size:12px;color:var(--text);background:rgba(0,0,0,0.2);padding:2px 8px;border-radius:4px;">--</code>
+        </div>
+
+        <div class="row g-3 mb-3">
+            <div class="col-md-3"><div style="background:rgba(99,102,241,0.06);border:1px solid var(--border);border-radius:10px;padding:12px;">
+                <div style="font-size:10px;color:var(--text-muted);font-weight:700;text-transform:uppercase;">Files</div>
+                <div id="filesDoneTotal" style="font-size:18px;font-weight:700;">0 / 0</div>
+            </div></div>
+            <div class="col-md-3"><div style="background:rgba(6,182,212,0.06);border:1px solid rgba(6,182,212,0.2);border-radius:10px;padding:12px;">
+                <div style="font-size:10px;color:var(--text-muted);font-weight:700;text-transform:uppercase;">Downloaded</div>
+                <div id="bytesText" style="font-size:18px;font-weight:700;">0 MB</div>
+                <div style="font-size:10px;color:var(--text-dim);" id="bytesTotalText">of 0 MB</div>
+            </div></div>
+            <div class="col-md-3"><div style="background:rgba(16,185,129,0.06);border:1px solid rgba(16,185,129,0.2);border-radius:10px;padding:12px;">
+                <div style="font-size:10px;color:var(--text-muted);font-weight:700;text-transform:uppercase;">Speed</div>
+                <div id="speedText" style="font-size:18px;font-weight:700;">0 KB/s</div>
+            </div></div>
+            <div class="col-md-3"><div style="background:rgba(245,158,11,0.06);border:1px solid rgba(245,158,11,0.2);border-radius:10px;padding:12px;">
+                <div style="font-size:10px;color:var(--text-muted);font-weight:700;text-transform:uppercase;">ETA</div>
+                <div id="etaText" style="font-size:18px;font-weight:700;">--</div>
+            </div></div>
+        </div>
+        <div class="row g-3 mb-3">
+            <div class="col-md-4"><div style="background:rgba(16,185,129,0.06);border:1px solid rgba(16,185,129,0.2);border-radius:10px;padding:12px;">
+                <div style="font-size:10px;color:var(--text-muted);font-weight:700;text-transform:uppercase;">Downloaded Files</div>
+                <div id="filesDownloadedText" style="font-size:18px;font-weight:700;">0</div>
+            </div></div>
+            <div class="col-md-4"><div style="background:rgba(100,116,139,0.08);border:1px solid rgba(100,116,139,0.2);border-radius:10px;padding:12px;">
+                <div style="font-size:10px;color:var(--text-muted);font-weight:700;text-transform:uppercase;">Skipped Unchanged</div>
+                <div id="filesSkippedText" style="font-size:18px;font-weight:700;">0</div>
+            </div></div>
+            <div class="col-md-4"><div style="background:rgba(6,182,212,0.08);border:1px solid rgba(6,182,212,0.2);border-radius:10px;padding:12px;">
+                <div style="font-size:10px;color:var(--text-muted);font-weight:700;text-transform:uppercase;">Resumed Files</div>
+                <div id="filesResumedText" style="font-size:18px;font-weight:700;">0</div>
+            </div></div>
+        </div>
+
+        <div style="background:rgba(255,255,255,0.02);border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:18px;">
+            <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:8px;">
+                <span id="currentFileName" style="color:var(--text-muted);font-family:'JetBrains Mono',monospace;max-width:70%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Preparing...</span>
+                <span style="color:var(--text);font-weight:600;" id="overallPctText">0%</span>
+            </div>
+            <div class="progress-modern"><div class="progress-bar-modern" id="overallProgressBar" style="width:0%;"></div></div>
+        </div>
+
+        <div class="d-flex gap-2 justify-content-end">
+            <button type="button" class="btn-modern" onclick="pauseTask()" id="pauseBtn" style="background:rgba(245,158,11,0.15);color:var(--warning);border:1px solid rgba(245,158,11,0.3);"><i class="bi bi-pause-fill"></i> Pause</button>
+            <button type="button" class="btn-modern" onclick="resumeTask()" id="resumeBtn" style="display:none;background:rgba(16,185,129,0.15);color:var(--success);border:1px solid rgba(16,185,129,0.3);"><i class="bi bi-play-fill"></i> Resume</button>
+            <button type="button" class="btn-modern btn-danger-modern" onclick="cancelTask()"><i class="bi bi-x-circle-fill"></i> Cancel</button>
+        </div>
+    </div>
+</div>
+
+<!-- ★★★ PATH PICKER MODAL - REBUILT with proper delegation ★★★ -->
+<div class="modal fade" id="pathPickerModal" tabindex="-1">
+    <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content" style="background:var(--bg-elevated);border:1px solid var(--border);border-radius:16px;">
+            <div class="modal-header" style="border-bottom:1px solid var(--border);">
+                <h5 class="modal-title" style="color:var(--text);font-weight:600;">
+                    <i class="bi bi-folder2-open" style="color:var(--accent);"></i> Browse Destination Path
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div style="background:rgba(99,102,241,0.06);border:1px solid var(--border);border-radius:10px;padding:10px 14px;margin-bottom:14px;display:flex;align-items:center;gap:10px;">
+                    <button type="button" class="btn-modern btn-ghost-modern" onclick="goUp()" style="padding:6px 10px;" title="Go up"><i class="bi bi-arrow-up"></i></button>
+                    <code id="currentPath" style="flex:1;color:var(--text);font-size:13px;">/backup/sharepoint</code>
+                    <button type="button" class="btn-modern btn-ghost-modern" onclick="refreshPath()" style="padding:6px 10px;" title="Refresh"><i class="bi bi-arrow-clockwise"></i></button>
+                </div>
+
+                <div style="margin-bottom:14px;">
+                    <div style="font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;">Quick Access</div>
+                    <div class="d-flex flex-wrap gap-2">
+                        <button type="button" class="badge-modern badge-info" onclick="navTo('/backup/sharepoint')" style="border:1px solid var(--border);cursor:pointer;padding:6px 12px;"><i class="bi bi-archive"></i> Backup Root</button>
+                        <button type="button" class="badge-modern badge-primary" onclick="navTo('/backup/sharepoint')" style="border:1px solid var(--border);cursor:pointer;padding:6px 12px;"><i class="bi bi-hdd"></i> Mounted Data</button>
+                        <button type="button" class="badge-modern badge-warning" onclick="navTo('/tmp')" style="border:1px solid var(--border);cursor:pointer;padding:6px 12px;"><i class="bi bi-folder"></i> Temp</button>
+                    </div>
+                </div>
+
+                <!-- Directory listing - PROPER event delegation pattern -->
+                <div id="dirList" style="background:rgba(0,0,0,0.2);border:1px solid var(--border);border-radius:10px;max-height:350px;overflow-y:auto;padding:6px;">
+                    <div style="padding:30px;text-align:center;color:var(--text-muted);">Loading...</div>
+                </div>
+
+                <div style="margin-top:14px;display:flex;gap:8px;">
+                    <input type="text" id="newFolderName" placeholder="New folder name..." style="flex:1;background:rgba(15,21,38,0.8);border:1px solid var(--border);border-radius:10px;padding:10px 12px;color:var(--text);font-size:13px;">
+                    <button type="button" class="btn-modern btn-ghost-modern" onclick="createFolder()" style="padding:8px 14px;"><i class="bi bi-folder-plus"></i> Create</button>
+                </div>
+            </div>
+            <div class="modal-footer" style="border-top:1px solid var(--border);">
+                <button type="button" class="btn-modern btn-ghost-modern" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn-modern btn-primary-modern" onclick="selectPath()"><i class="bi bi-check-lg"></i> Use This Path</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const HOST = '{{ config.sharepoint.host }}';
+const DOWNLOAD_TASK_STORAGE_KEY = 'm365backup.activeDownloadTaskId';
+let currentTaskId = null;
+let pollInterval = null;
+let pathPickerCurrent = '/backup/sharepoint';
+
+function clearForm() {
+    document.getElementById('urlInput').value = '';
+    document.getElementById('destPath').value = '';
+    document.getElementById('urlPreviewCard').style.display = 'none';
+}
+
+async function parseUrl() {
+    const url = document.getElementById('urlInput').value.trim();
+    if (!url) return showToast('URL required', 'warning');
+    const res = await apiCall('/api/download/parse', 'POST', { url });
+    if (res.status === 'ok') {
+        const p = res.parsed;
+        document.getElementById('prevHost').textContent = p.host;
+        document.getElementById('prevSite').textContent = p.site_path || '(root)';
+        document.getElementById('prevFolder').textContent = p.folder_path || '(all libraries)';
+        document.getElementById('urlPreviewCard').style.display = 'block';
+        showToast('URL parsed', 'success');
+    } else {
+        showToast(res.error || 'Failed', 'error');
+    }
+}
+
+async function startDownload() {
+    const url = document.getElementById('urlInput').value.trim();
+    const destPath = document.getElementById('destPath').value.trim();
+    if (!url) return showToast('URL required', 'warning');
+
+    const btn = document.getElementById('downloadBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="bi bi-arrow-repeat spin"></i> Starting...';
+
+    const res = await apiCall('/api/download/url', 'POST', { url, dest_dir: destPath || null });
+
+    if (res.task_id) {
+        currentTaskId = res.task_id;
+        localStorage.setItem(DOWNLOAD_TASK_STORAGE_KEY, res.task_id);
+        showToast(`Started: ${res.task_id.substring(0, 8)}`, 'success');
+        document.getElementById('progressPanel').style.display = 'block';
+        document.getElementById('progressState').textContent = 'RUNNING';
+        document.getElementById('progressState').className = 'badge-modern badge-info';
+        document.getElementById('progressPanel').scrollIntoView({ behavior: 'smooth' });
+        pollDownloadStatus(res.task_id);
+    } else {
+        showToast(res.error || 'Failed', 'error');
+        resetDownloadBtn();
+    }
+}
+
+function pollDownloadStatus(taskId) {
+    if (pollInterval) clearInterval(pollInterval);
+    pollInterval = setInterval(async () => {
+        try {
+            const data = await apiCall(`/api/download/status/${taskId}`);
+            updateProgressUI(data);
+            updateControlUI(data.control_state || 'running');
+            if (data.state === 'SUCCESS') {
+                clearInterval(pollInterval);
+                localStorage.removeItem(DOWNLOAD_TASK_STORAGE_KEY);
+                document.getElementById('progressState').textContent = 'COMPLETED';
+                document.getElementById('progressState').className = 'badge-modern badge-success';
+                const r = data.result || {};
+                const parts = [`${r.downloaded || 0} downloaded`, `${r.skipped || 0} skipped`];
+                if (r.resumed) parts.push(`${r.resumed} resumed`);
+                showToast(`Done! ${parts.join(', ')} · ${formatBytes(r.bytes || 0)}`, 'success');
+                resetDownloadBtn();
+            }
+            if (data.state === 'FAILURE' || data.state === 'REVOKED' || data.state === 'UNKNOWN') {
+                clearInterval(pollInterval);
+                localStorage.removeItem(DOWNLOAD_TASK_STORAGE_KEY);
+                const cancelled = data.state === 'REVOKED' || data.control_state === 'cancelled';
+                document.getElementById('progressState').textContent = cancelled ? 'CANCELLED' : 'FAILED';
+                document.getElementById('progressState').className = cancelled ? 'badge-modern badge-warning' : 'badge-modern badge-danger';
+                showToast(cancelled ? 'Download cancelled' : ('Failed: ' + (data.error || 'Unknown')), cancelled ? 'warning' : 'error');
+                resetDownloadBtn();
+            }
+        } catch (e) { console.error(e); }
+    }, 1000);
+}
+
+function updateProgressUI(data) {
+    const m = data.meta || {};
+    document.getElementById('overallPctText').textContent = (m.overall_pct || 0) + '%';
+    document.getElementById('overallProgressBar').style.width = (m.overall_pct || 0) + '%';
+    document.getElementById('filesDoneTotal').textContent = `${m.files_done || 0} / ${m.files_total || 0}`;
+    document.getElementById('bytesText').textContent = formatBytes(m.bytes_done || 0);
+    document.getElementById('bytesTotalText').textContent = 'of ' + formatBytes(m.bytes_total || 0);
+    document.getElementById('speedText').textContent = m.is_paused ? '⏸ Paused' : (m.speed_human || '0 KB/s');
+    document.getElementById('etaText').textContent = m.is_paused ? '--' : (m.eta_human || '--');
+    document.getElementById('filesDownloadedText').textContent = (m.files_downloaded || 0).toLocaleString();
+    document.getElementById('filesSkippedText').textContent = (m.files_skipped || 0).toLocaleString();
+    document.getElementById('filesResumedText').textContent = (m.files_resumed || 0).toLocaleString();
+    document.getElementById('currentFileName').textContent = m.current_file || 'Enumerating...';
+    if (m.dest) document.getElementById('destPathDisplay').textContent = m.dest;
+}
+
+function updateControlUI(state) {
+    const pauseBtn = document.getElementById('pauseBtn');
+    const resumeBtn = document.getElementById('resumeBtn');
+    const stateBadge = document.getElementById('progressState');
+    if (state === 'paused') {
+        pauseBtn.style.display = 'none';
+        resumeBtn.style.display = 'inline-flex';
+        stateBadge.textContent = 'PAUSED';
+        stateBadge.className = 'badge-modern badge-warning';
+    } else if (state === 'cancelled') {
+        pauseBtn.style.display = 'none';
+        resumeBtn.style.display = 'none';
+        stateBadge.textContent = 'CANCELLED';
+        stateBadge.className = 'badge-modern badge-warning';
+    } else if (state === 'failed') {
+        pauseBtn.style.display = 'none';
+        resumeBtn.style.display = 'none';
+        stateBadge.textContent = 'FAILED';
+        stateBadge.className = 'badge-modern badge-danger';
+    } else if (state === 'completed') {
+        pauseBtn.style.display = 'none';
+        resumeBtn.style.display = 'none';
+        stateBadge.textContent = 'COMPLETED';
+        stateBadge.className = 'badge-modern badge-success';
+    } else {
+        pauseBtn.style.display = 'inline-flex';
+        resumeBtn.style.display = 'none';
+        stateBadge.textContent = 'RUNNING';
+        stateBadge.className = 'badge-modern badge-info';
+    }
+}
+
+async function pauseTask() {
+    if (!currentTaskId) return;
+    await apiCall(`/api/task/${currentTaskId}/pause`, 'POST');
+    showToast('Download paused', 'warning');
+}
+async function resumeTask() {
+    if (!currentTaskId) return;
+    await apiCall(`/api/task/${currentTaskId}/resume`, 'POST');
+    showToast('Download resumed', 'success');
+}
+async function cancelTask() {
+    if (!currentTaskId) return;
+    if (!confirm('Cancel?')) return;
+    await apiCall(`/api/task/${currentTaskId}/cancel`, 'POST');
+    updateControlUI('cancelled');
+    showToast('Cancel requested', 'info');
+}
+
+function resetDownloadBtn() {
+    const btn = document.getElementById('downloadBtn');
+    btn.disabled = false;
+    btn.innerHTML = '<i class="bi bi-cloud-download-fill"></i> Start Download';
+    currentTaskId = null;
+}
+
+async function restoreDownloadProgress() {
+    let taskId = null;
+    try {
+        const active = await apiCall('/api/task/active');
+        taskId = active.download_task_id || null;
+    } catch (e) {
+        console.error('Failed to read active task:', e);
+    }
+
+    if (!taskId) {
+        taskId = localStorage.getItem(DOWNLOAD_TASK_STORAGE_KEY);
+    }
+    if (!taskId) {
+        return;
+    }
+
+    try {
+        const data = await apiCall(`/api/download/status/${taskId}`);
+        if (data.state === 'PROGRESS') {
+            currentTaskId = taskId;
+            localStorage.setItem(DOWNLOAD_TASK_STORAGE_KEY, taskId);
+            document.getElementById('progressPanel').style.display = 'block';
+            updateProgressUI(data);
+            updateControlUI(data.control_state || 'running');
+            pollDownloadStatus(taskId);
+            return;
+        }
+    } catch (e) {
+        console.error('Failed to restore task state:', e);
+    }
+
+    localStorage.removeItem(DOWNLOAD_TASK_STORAGE_KEY);
+}
+
+// ╔════════════════════════════════════════════════════════════╗
+// ║ ★★★ PATH PICKER — FIXED v6 with proper event delegation ★★★║
+// ╚════════════════════════════════════════════════════════════╝
+
+function openPathPicker() {
+    const modal = new bootstrap.Modal(document.getElementById('pathPickerModal'));
+    modal.show();
+    // Use current destPath value if set, else default
+    const currentDest = document.getElementById('destPath').value.trim();
+    if (currentDest && currentDest.startsWith('/')) {
+        // Get parent of current path if it exists
+        pathPickerCurrent = currentDest;
+    }
+    navTo(pathPickerCurrent);
+}
+
+// ★ ATTACH event listener ONCE on parent (NOT on individual items) ★
+// This handles items added dynamically after page load
+document.addEventListener('DOMContentLoaded', function() {
+    restoreDownloadProgress();
+    const dirList = document.getElementById('dirList');
+    if (dirList) {
+        // Single event listener on parent — works for all current + future children
+        dirList.addEventListener('click', function(e) {
+            const item = e.target.closest('.dir-item');
+            if (item) {
+                e.preventDefault();
+                e.stopPropagation();
+                const targetPath = item.getAttribute('data-path');
+                console.log('Click detected, navigating to:', targetPath);
+                if (targetPath) {
+                    navTo(targetPath);
+                }
+            }
+        });
+        
+        // Hover effects via delegation
+        dirList.addEventListener('mouseover', function(e) {
+            const item = e.target.closest('.dir-item');
+            if (item) item.style.background = 'rgba(99,102,241,0.12)';
+        });
+        dirList.addEventListener('mouseout', function(e) {
+            const item = e.target.closest('.dir-item');
+            if (item) item.style.background = 'transparent';
+        });
+    }
+});
+
+async function navTo(path) {
+    console.log('navTo called with path:', path);
+    pathPickerCurrent = path;
+    document.getElementById('currentPath').textContent = path;
+    document.getElementById('dirList').innerHTML = '<div style="padding:30px;text-align:center;color:var(--text-muted);"><i class="bi bi-arrow-repeat spin"></i> Loading...</div>';
+    
+    try {
+        const r = await fetch(`/api/browse?path=${encodeURIComponent(path)}`);
+        const data = await r.json();
+        console.log('Browse response:', data);
+        
+        if (data.error) {
+            document.getElementById('dirList').innerHTML = `<div style="padding:30px;text-align:center;color:var(--danger);"><i class="bi bi-exclamation-triangle"></i> ${data.error}</div>`;
+            return;
+        }
+        
+        if (!data.items || data.items.length === 0) {
+            document.getElementById('dirList').innerHTML = '<div style="padding:30px;text-align:center;color:var(--text-dim);"><i class="bi bi-folder-x" style="font-size:32px;display:block;margin-bottom:8px;opacity:0.5;"></i>No subdirectories — click "Use This Path" to use current path</div>';
+            return;
+        }
+        
+        // ★ Build HTML with data attributes — NO inline onclick ★
+        const html = data.items.map(item => {
+            // Use JSON.stringify to safely escape path for attribute
+            const safePath = item.path.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            const safeName = item.name.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            return `<div class="dir-item" data-path="${safePath}" style="display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:8px;cursor:pointer;transition:background 0.2s;color:var(--text);user-select:none;">
+                <i class="bi bi-folder-fill" style="color:var(--accent);font-size:16px;pointer-events:none;"></i>
+                <span style="font-family:'JetBrains Mono',monospace;font-size:13px;pointer-events:none;">${safeName}</span>
+            </div>`;
+        }).join('');
+        
+        document.getElementById('dirList').innerHTML = html;
+        // Event listeners on parent already set in DOMContentLoaded — NO need to re-attach!
+    } catch (e) {
+        console.error('navTo error:', e);
+        document.getElementById('dirList').innerHTML = `<div style="padding:30px;color:var(--danger);">Error: ${e.message}</div>`;
+    }
+}
+
+function goUp() {
+    const parts = pathPickerCurrent.split('/').filter(p => p);
+    parts.pop();
+    const parent = '/' + parts.join('/');
+    if (parent !== pathPickerCurrent && parent !== '') navTo(parent);
+}
+
+function refreshPath() { navTo(pathPickerCurrent); }
+
+function selectPath() {
+    document.getElementById('destPath').value = pathPickerCurrent;
+    bootstrap.Modal.getInstance(document.getElementById('pathPickerModal')).hide();
+    showToast('Path selected: ' + pathPickerCurrent, 'success');
+}
+
+async function createFolder() {
+    const name = document.getElementById('newFolderName').value.trim();
+    if (!name) return showToast('Folder name required', 'warning');
+    const path = pathPickerCurrent + '/' + name;
+    const r = await apiCall('/api/browse/mkdir', 'POST', { path });
+    if (r.status === 'created') {
+        showToast('Folder created: ' + name, 'success');
+        document.getElementById('newFolderName').value = '';
+        navTo(pathPickerCurrent);
+    } else {
+        showToast(r.error || 'Failed', 'error');
+    }
+}
+
+// Auto-detect active download on page load
+window.addEventListener('load', async () => {
+    try {
+        const res = await apiCall('/api/task/active');
+        if (res.download_task_id) {
+            currentTaskId = res.download_task_id;
+            document.getElementById('progressPanel').style.display = 'block';
+            pollDownloadStatus(res.download_task_id);
+        }
+    } catch(e) {}
+});
+</script>
+{% endblock %}

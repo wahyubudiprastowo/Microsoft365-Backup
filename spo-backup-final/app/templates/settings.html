@@ -1,0 +1,556 @@
+{% extends "base.html" %}
+{% block title %}Settings{% endblock %}
+{% block page_title %}<i class="bi bi-gear-fill" style="color:var(--primary);"></i> Settings{% endblock %}
+{% block content %}
+
+<div class="glass-card mb-4" style="border-color:rgba(245,158,11,0.25);">
+    <div class="card-body">
+        <div style="display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap;">
+            <div style="width:46px;height:46px;border-radius:12px;background:rgba(245,158,11,0.12);display:flex;align-items:center;justify-content:center;color:var(--warning);font-size:22px;">
+                <i class="bi bi-exclamation-triangle-fill"></i>
+            </div>
+            <div style="flex:1;min-width:260px;">
+                <div style="font-weight:700;font-size:15px;">Legacy Compatibility Settings</div>
+                <div style="color:var(--text-muted);font-size:13px;margin-top:4px;">
+                    Halaman ini masih mempertahankan global schedule dan raw config editor untuk kompatibilitas.
+                    Untuk operasi harian multi-tenant, gunakan <a href="/schedules" style="color:var(--accent);font-weight:600;">Per-Tenant Schedules</a> sebagai flow utama.
+                </div>
+                <div style="margin-top:10px;font-size:12px;color:var(--warning);font-weight:600;">
+                    Gunakan `Schedules` untuk backup tenant aktif per workload. Gunakan `Legacy Global Schedule` di bawah hanya jika Anda memang masih menjalankan flow lama satu jadwal global untuk semua site.
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ★★★ NEW: Remote Destinations (SMB/FTP/SFTP/WebDAV) ★★★ -->
+<div class="glass-card mb-4">
+    <div class="card-header">
+        <h6><i class="bi bi-cloud-arrow-up-fill" style="color:var(--success);"></i> Remote Destinations</h6>
+        <span class="badge-modern badge-success">Multi-Protocol Upload</span>
+    </div>
+    <div class="card-body">
+        <p style="color:var(--text-muted);font-size:13px;margin-bottom:18px;">
+            <i class="bi bi-info-circle"></i> 
+            Setelah backup selesai, hasil backup akan otomatis di-upload ke destinasi remote yang dikonfigurasi.
+            Supported: <strong>SMB/CIFS</strong>, <strong>FTP/FTPS</strong>, <strong>SFTP/SSH</strong>, <strong>WebDAV</strong>.
+        </p>
+
+        <!-- Existing destinations list -->
+        <div id="remoteList" style="margin-bottom:14px;"></div>
+
+        <!-- Add new destination button -->
+        <button type="button" class="btn-modern btn-primary-modern" onclick="showAddRemoteModal()">
+            <i class="bi bi-plus-lg"></i> Add Remote Destination
+        </button>
+    </div>
+</div>
+
+<!-- Schedule -->
+<div class="glass-card mb-4">
+    <div class="card-header">
+        <h6><i class="bi bi-clock-history" style="color:var(--warning);"></i> Legacy Global Schedule</h6>
+        <span class="badge-modern badge-warning">Compatibility Mode</span>
+    </div>
+    <div class="card-body">
+        <div style="background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:10px;padding:14px 16px;font-size:13px;color:var(--text-muted);margin-bottom:16px;">
+            <div style="font-weight:700;color:var(--warning);margin-bottom:8px;">Read-only compatibility summary</div>
+            <div>Current global cron: <code style="color:var(--accent);">{{ config.schedule.cron_expression }}</code></div>
+            <div>Status: <strong style="color:{% if config.schedule.enabled %}var(--success){% else %}var(--text-dim){% endif %};">{% if config.schedule.enabled %}Enabled{% else %}Disabled{% endif %}</strong></div>
+            <div>Timezone: <code style="color:var(--text);">{{ config.schedule.timezone }}</code></div>
+        </div>
+        <div style="background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.2);border-radius:10px;padding:12px;margin-top:14px;font-size:13px;">
+            <i class="bi bi-info-circle" style="color:var(--warning);"></i>
+            Global schedule tidak lagi diedit dari halaman ini agar tidak bentrok dengan flow utama.
+            Untuk konfigurasi harian, buka <a href="/schedules" style="color:var(--accent);font-weight:600;">Per-Tenant Schedules</a>.
+        </div>
+        <div class="d-flex justify-content-end gap-2 mt-3">
+            <a href="/schedules" class="btn-modern btn-primary-modern"><i class="bi bi-clock-history"></i> Open Per-Tenant Schedules</a>
+        </div>
+    </div>
+</div>
+
+<!-- Notification Test -->
+<div class="glass-card mb-4">
+    <div class="card-header"><h6><i class="bi bi-broadcast" style="color:var(--accent);"></i> Notification Test</h6></div>
+    <div class="card-body">
+        <div class="d-flex gap-2 flex-wrap">
+            <button type="button" class="btn-modern btn-ghost-modern" onclick="testNotif('email')"><i class="bi bi-envelope"></i> Test Email</button>
+            <button type="button" class="btn-modern btn-ghost-modern" onclick="testNotif('telegram')"><i class="bi bi-telegram"></i> Test Telegram</button>
+            <button type="button" class="btn-modern btn-ghost-modern" onclick="testNotif('teams')"><i class="bi bi-microsoft-teams"></i> Test Teams</button>
+            <button type="button" class="btn-modern btn-primary-modern" onclick="testNotif()"><i class="bi bi-send"></i> Test All</button>
+        </div>
+        <div id="testResult" class="mt-3" style="font-size:13px;color:var(--text-muted);"></div>
+    </div>
+</div>
+
+<!-- Raw JSON Editor -->
+<div class="glass-card">
+    <div class="card-header">
+        <h6><i class="bi bi-code-slash"></i> Raw Configuration (Advanced)</h6>
+        <button type="button" class="btn-modern btn-ghost-modern" onclick="loadCfg()" style="padding:6px 14px;font-size:12px;"><i class="bi bi-arrow-clockwise"></i> Reload</button>
+    </div>
+    <div class="card-body">
+        <textarea id="cfgEditor" rows="20" style="width:100%;background:#050810;color:#cbd5e1;border:1px solid var(--border);border-radius:10px;padding:16px;font-family:'JetBrains Mono',monospace;font-size:13px;line-height:1.6;resize:vertical;"></textarea>
+        <div class="d-flex justify-content-end gap-2 mt-3">
+            <button type="button" class="btn-modern btn-ghost-modern" onclick="loadCfg()">Cancel</button>
+            <button type="button" class="btn-modern btn-primary-modern" onclick="saveCfg()"><i class="bi bi-check-lg"></i> Save All</button>
+        </div>
+    </div>
+</div>
+
+<!-- ╔══════════════════════════════════════════════════════════════╗ -->
+<!-- ║  ADD/EDIT REMOTE DESTINATION MODAL                            ║ -->
+<!-- ╚══════════════════════════════════════════════════════════════╝ -->
+<div class="modal fade" id="remoteModal" tabindex="-1">
+    <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content" style="background:var(--bg-elevated);border:1px solid var(--border);border-radius:16px;">
+            <div class="modal-header" style="border-bottom:1px solid var(--border);">
+                <h5 class="modal-title" style="color:var(--text);font-weight:600;">
+                    <i class="bi bi-cloud-arrow-up-fill" style="color:var(--success);"></i>
+                    <span id="remoteModalTitle">Add Remote Destination</span>
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="form-modern">
+                    <input type="hidden" id="editingIndex" value="-1">
+                    
+                    <div class="row g-3 mb-3">
+                        <div class="col-md-6">
+                            <label>Friendly Name</label>
+                            <input type="text" id="destName" placeholder="My NAS Backup">
+                        </div>
+                        <div class="col-md-6">
+                            <label>Protocol</label>
+                            <select id="destProtocol" onchange="updateProtocolFields()">
+                                <option value="smb">SMB / CIFS (Windows Share)</option>
+                                <option value="ftp">FTP / FTPS</option>
+                                <option value="sftp">SFTP / SSH</option>
+                                <option value="webdav">WebDAV (Nextcloud, ownCloud)</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="row g-3 mb-3" id="serverFields">
+                        <div class="col-md-9">
+                            <label>Server / Host</label>
+                            <input type="text" id="destServer" placeholder="192.168.1.100 or nas.example.com">
+                        </div>
+                        <div class="col-md-3">
+                            <label>Port</label>
+                            <input type="number" id="destPort" placeholder="445">
+                        </div>
+                    </div>
+
+                    <div id="webdavUrlField" style="display:none;margin-bottom:16px;">
+                        <label>WebDAV URL</label>
+                        <input type="url" id="destWebdavUrl" placeholder="https://nextcloud.example.com/remote.php/dav/files/user/">
+                    </div>
+
+                    <div class="row g-3 mb-3">
+                        <div class="col-md-6">
+                            <label>Username</label>
+                            <input type="text" id="destUsername" placeholder="user@domain">
+                        </div>
+                        <div class="col-md-6">
+                            <label>Password</label>
+                            <input type="password" id="destPassword" placeholder="********">
+                            <div class="form-hint" id="destPasswordHint">Masukkan password untuk koneksi remote.</div>
+                        </div>
+                    </div>
+
+                    <div id="smbFields" style="margin-bottom:16px;">
+                        <div class="row g-3">
+                            <div class="col-md-6">
+                                <label>Share Name</label>
+                                <input type="text" id="destShare" placeholder="backup">
+                            </div>
+                            <div class="col-md-6">
+                                <label>Domain (optional)</label>
+                                <input type="text" id="destDomain" placeholder="WORKGROUP">
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="sftpFields" style="display:none;margin-bottom:16px;">
+                        <label>Private Key Path (optional, instead of password)</label>
+                        <input type="text" id="destKeyPath" placeholder="/path/to/id_rsa">
+                    </div>
+
+                    <div id="ftpsField" style="display:none;margin-bottom:16px;">
+                        <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;">
+                            <input type="checkbox" id="destUseTls" style="width:auto;"> Use FTPS (FTP over TLS)
+                        </label>
+                    </div>
+
+                    <div style="margin-bottom:16px;">
+                        <label>Remote Path</label>
+                        <input type="text" id="destRemotePath" placeholder="/backup/sharepoint">
+                        <div class="form-hint">Path di server tujuan tempat backup disimpan</div>
+                    </div>
+
+                    <div style="background:rgba(99,102,241,0.06);border:1px solid var(--border);border-radius:10px;padding:12px;font-size:13px;">
+                        <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;">
+                            <input type="checkbox" id="destEnabled" checked style="width:auto;"> 
+                            <strong>Enabled</strong> — auto-upload to this destination after backup
+                        </label>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer" style="border-top:1px solid var(--border);justify-content:space-between;">
+                <button type="button" class="btn-modern btn-ghost-modern" onclick="testRemoteConnection()">
+                    <i class="bi bi-wifi"></i> Test Connection
+                </button>
+                <div class="d-flex gap-2">
+                    <button type="button" class="btn-modern btn-ghost-modern" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn-modern btn-primary-modern" onclick="saveRemoteDestination()">
+                        <i class="bi bi-check-lg"></i> Save Destination
+                    </button>
+                </div>
+            </div>
+            <div id="testConnectionResult" style="padding:0 22px 14px;font-size:13px;"></div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+let currentRemotes = [];
+
+// ═══════════════════════════════════════════════════════════
+// REMOTE DESTINATIONS
+// ═══════════════════════════════════════════════════════════
+async function loadRemotes() {
+    const res = await apiCall('/api/remote-destinations');
+    currentRemotes = res.destinations || [];
+    renderRemotes();
+}
+
+function renderRemotes() {
+    const container = document.getElementById('remoteList');
+    if (currentRemotes.length === 0) {
+        container.innerHTML = '<div style="padding:30px;text-align:center;color:var(--text-dim);font-size:13px;background:rgba(99,102,241,0.04);border:1px dashed var(--border);border-radius:10px;"><i class="bi bi-cloud-slash" style="font-size:32px;display:block;margin-bottom:8px;opacity:0.5;"></i>No remote destinations configured.<br>Backup hanya disimpan lokal.</div>';
+        return;
+    }
+    container.innerHTML = currentRemotes.map((dest, idx) => {
+        const protocolIcons = { smb: 'hdd-network', ftp: 'arrow-up-circle', sftp: 'shield-lock', webdav: 'cloud' };
+        const protocolColors = { smb: 'var(--primary)', ftp: 'var(--warning)', sftp: 'var(--success)', webdav: 'var(--accent)' };
+        const icon = protocolIcons[dest.protocol] || 'cloud';
+        const color = protocolColors[dest.protocol] || 'var(--primary)';
+        const enabled = dest.enabled !== false;
+        const server = dest.config?.server || dest.config?.url || '?';
+        const path = dest.config?.remote_path || '/';
+        return `
+            <div style="background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:8px;${enabled ? '' : 'opacity:0.5;'}">
+                <div style="display:flex;align-items:center;gap:14px;">
+                    <div style="width:42px;height:42px;border-radius:10px;background:${color}1A;display:flex;align-items:center;justify-content:center;">
+                        <i class="bi bi-${icon}" style="color:${color};font-size:22px;"></i>
+                    </div>
+                    <div style="flex:1;min-width:0;">
+                        <div style="font-weight:600;color:var(--text);font-size:14px;">${dest.name || 'Unnamed'}</div>
+                        <div style="font-size:12px;color:var(--text-muted);font-family:'JetBrains Mono',monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                            ${dest.protocol.toUpperCase()} • ${server} • ${path}
+                        </div>
+                    </div>
+                    <span class="badge-modern" style="background:${color}1A;color:${color};">${dest.protocol.toUpperCase()}</span>
+                    ${enabled ? '<span class="badge-modern badge-success"><i class="bi bi-check-circle"></i> ON</span>' : '<span class="badge-modern" style="background:rgba(100,116,139,0.15);color:var(--text-dim);">OFF</span>'}
+                    <button class="btn-modern btn-ghost-modern" onclick="editRemote(${idx})" style="padding:6px 10px;" title="Edit">
+                        <i class="bi bi-pencil"></i>
+                    </button>
+                    <button class="btn-modern btn-danger-modern" onclick="removeRemote(${idx})" style="padding:6px 10px;" title="Delete">
+                        <i class="bi bi-trash"></i>
+                    </button>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+function showAddRemoteModal() {
+    document.getElementById('editingIndex').value = -1;
+    document.getElementById('remoteModalTitle').textContent = 'Add Remote Destination';
+    document.getElementById('destName').value = '';
+    document.getElementById('destProtocol').value = 'smb';
+    document.getElementById('destServer').value = '';
+    document.getElementById('destPort').value = '445';
+    document.getElementById('destWebdavUrl').value = '';
+    document.getElementById('destUsername').value = '';
+    document.getElementById('destPassword').value = '';
+    document.getElementById('destShare').value = '';
+    document.getElementById('destDomain').value = 'WORKGROUP';
+    document.getElementById('destKeyPath').value = '';
+    document.getElementById('destUseTls').checked = false;
+    document.getElementById('destRemotePath').value = '/backup/sharepoint';
+    document.getElementById('destEnabled').checked = true;
+    document.getElementById('destPasswordHint').textContent = 'Masukkan password untuk koneksi remote.';
+    document.getElementById('testConnectionResult').innerHTML = '';
+    updateProtocolFields();
+    new bootstrap.Modal(document.getElementById('remoteModal')).show();
+}
+
+function editRemote(idx) {
+    const dest = currentRemotes[idx];
+    document.getElementById('editingIndex').value = idx;
+    document.getElementById('remoteModalTitle').textContent = 'Edit Remote Destination';
+    document.getElementById('destName').value = dest.name || '';
+    document.getElementById('destProtocol').value = dest.protocol || 'smb';
+    const c = dest.config || {};
+    document.getElementById('destServer').value = c.server || '';
+    document.getElementById('destPort').value = c.port || '';
+    document.getElementById('destWebdavUrl').value = c.url || '';
+    document.getElementById('destUsername').value = c.username || '';
+    document.getElementById('destPassword').value = c.password === '***MASKED***' ? '' : (c.password || '');
+    document.getElementById('destShare').value = c.share || '';
+    document.getElementById('destDomain').value = c.domain || 'WORKGROUP';
+    document.getElementById('destKeyPath').value = c.private_key_path || '';
+    document.getElementById('destUseTls').checked = c.use_tls || false;
+    document.getElementById('destRemotePath').value = c.remote_path || '/backup';
+    document.getElementById('destEnabled').checked = dest.enabled !== false;
+    document.getElementById('destPasswordHint').textContent = c.password === '***MASKED***'
+        ? 'Biarkan kosong untuk mempertahankan password yang sudah tersimpan.'
+        : 'Masukkan password untuk koneksi remote.';
+    document.getElementById('testConnectionResult').innerHTML = '';
+    updateProtocolFields();
+    new bootstrap.Modal(document.getElementById('remoteModal')).show();
+}
+
+function updateProtocolFields() {
+    const proto = document.getElementById('destProtocol').value;
+    const ports = { smb: 445, ftp: 21, sftp: 22, webdav: 443 };
+    document.getElementById('destPort').placeholder = ports[proto] || '';
+    if (!document.getElementById('destPort').value || 
+        Object.values(ports).includes(parseInt(document.getElementById('destPort').value))) {
+        document.getElementById('destPort').value = ports[proto] || '';
+    }
+    
+    document.getElementById('smbFields').style.display = proto === 'smb' ? '' : 'none';
+    document.getElementById('sftpFields').style.display = proto === 'sftp' ? '' : 'none';
+    document.getElementById('ftpsField').style.display = proto === 'ftp' ? '' : 'none';
+    document.getElementById('webdavUrlField').style.display = proto === 'webdav' ? '' : 'none';
+    document.getElementById('serverFields').style.display = proto === 'webdav' ? 'none' : '';
+}
+
+function buildRemoteConfig() {
+    const proto = document.getElementById('destProtocol').value;
+    const editingIndex = parseInt(document.getElementById('editingIndex').value, 10);
+    const existingDest = editingIndex >= 0 ? currentRemotes[editingIndex] : null;
+    const passwordInput = document.getElementById('destPassword').value;
+    const shouldKeepMaskedPassword = !passwordInput &&
+        existingDest &&
+        existingDest.config &&
+        existingDest.config.password === '***MASKED***';
+    const config = {
+        username: document.getElementById('destUsername').value,
+        password: shouldKeepMaskedPassword ? '***MASKED***' : passwordInput,
+        remote_path: document.getElementById('destRemotePath').value || '/',
+    };
+    
+    if (proto === 'webdav') {
+        config.url = document.getElementById('destWebdavUrl').value;
+    } else {
+        config.server = document.getElementById('destServer').value;
+        config.port = parseInt(document.getElementById('destPort').value) || undefined;
+    }
+    
+    if (proto === 'smb') {
+        config.share = document.getElementById('destShare').value;
+        config.domain = document.getElementById('destDomain').value || 'WORKGROUP';
+    } else if (proto === 'sftp') {
+        const keyPath = document.getElementById('destKeyPath').value.trim();
+        if (keyPath) config.private_key_path = keyPath;
+    } else if (proto === 'ftp') {
+        config.use_tls = document.getElementById('destUseTls').checked;
+    }
+    
+    return {
+        name: document.getElementById('destName').value.trim() || 'Unnamed',
+        protocol: proto,
+        enabled: document.getElementById('destEnabled').checked,
+        config: config,
+    };
+}
+
+async function testRemoteConnection() {
+    const dest = buildRemoteConfig();
+    const resultDiv = document.getElementById('testConnectionResult');
+    const testBtn = document.querySelector('#remoteModal .modal-footer .btn-modern.btn-ghost-modern');
+    const originalText = testBtn ? testBtn.innerHTML : '';
+    resultDiv.innerHTML = '<div style="color:var(--text-muted);"><i class="bi bi-arrow-repeat spin"></i> Testing connection...</div>';
+    if (testBtn) {
+        testBtn.disabled = true;
+        testBtn.innerHTML = '<i class="bi bi-arrow-repeat spin"></i> Testing...';
+    }
+
+    try {
+        const res = await apiCall('/api/remote-destinations/test', 'POST', dest);
+        if (res.task_id) {
+            let pollCount = 0;
+            const iv = setInterval(async () => {
+                pollCount++;
+                const status = await apiCall(`/api/remote-destinations/test/status/${res.task_id}`);
+                if (status.state === 'SUCCESS') {
+                    clearInterval(iv);
+                    if (testBtn) {
+                        testBtn.disabled = false;
+                        testBtn.innerHTML = originalText;
+                    }
+                    const r = status.result || {};
+                    if (r.status === 'ok') {
+                        resultDiv.innerHTML = `<div style="color:var(--success);background:rgba(16,185,129,0.1);border:1px solid rgba(16,185,129,0.3);border-radius:8px;padding:10px;"><i class="bi bi-check-circle-fill"></i> <strong>Connection OK</strong> — ${escapeHtml(r.message || 'Connected')}</div>`;
+                    } else {
+                        resultDiv.innerHTML = `<div style="color:var(--danger);background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:10px;"><i class="bi bi-x-circle-fill"></i> <strong>Failed</strong> — ${escapeHtml(r.message || 'Connection failed')}</div>`;
+                    }
+                }
+                if (status.state === 'FAILURE') {
+                    clearInterval(iv);
+                    if (testBtn) {
+                        testBtn.disabled = false;
+                        testBtn.innerHTML = originalText;
+                    }
+                    resultDiv.innerHTML = `<div style="color:var(--danger);"><i class="bi bi-x-circle-fill"></i> Error: ${escapeHtml(status.error || 'Unknown error')}</div>`;
+                }
+                if (pollCount > 30) {
+                    clearInterval(iv);
+                    if (testBtn) {
+                        testBtn.disabled = false;
+                        testBtn.innerHTML = originalText;
+                    }
+                    resultDiv.innerHTML = `<div style="color:var(--warning);"><i class="bi bi-hourglass-split"></i> Test timed out. Check server reachability and try again.</div>`;
+                }
+            }, 1000);
+        } else {
+            resultDiv.innerHTML = `<div style="color:var(--danger);">${escapeHtml(res.error || 'Failed to test')}</div>`;
+            if (testBtn) {
+                testBtn.disabled = false;
+                testBtn.innerHTML = originalText;
+            }
+        }
+    } catch (e) {
+        resultDiv.innerHTML = `<div style="color:var(--danger);"><i class="bi bi-x-circle-fill"></i> Error: ${escapeHtml(e.message)}</div>`;
+        if (testBtn) {
+            testBtn.disabled = false;
+            testBtn.innerHTML = originalText;
+        }
+    }
+}
+
+async function saveRemoteDestination() {
+    const dest = buildRemoteConfig();
+    if (!dest.name) return showToast('Name required', 'warning');
+    const saveBtn = document.querySelector('#remoteModal .btn-primary-modern');
+    const originalText = saveBtn ? saveBtn.innerHTML : '';
+    if (saveBtn) {
+        saveBtn.disabled = true;
+        saveBtn.innerHTML = '<i class="bi bi-arrow-repeat spin"></i> Saving...';
+    }
+
+    const idx = parseInt(document.getElementById('editingIndex').value);
+    if (idx >= 0) {
+        currentRemotes[idx] = dest;
+    } else {
+        currentRemotes.push(dest);
+    }
+
+    const ok = await saveAllRemotes();
+    if (saveBtn) {
+        saveBtn.disabled = false;
+        saveBtn.innerHTML = originalText;
+    }
+    if (ok) {
+        const modal = bootstrap.Modal.getInstance(document.getElementById('remoteModal'));
+        if (modal) modal.hide();
+    }
+}
+
+function removeRemote(idx) {
+    if (!confirm('Remove this destination?')) return;
+    currentRemotes.splice(idx, 1);
+    saveAllRemotes();
+}
+
+async function saveAllRemotes() {
+    const res = await apiCall('/api/remote-destinations', 'POST', { destinations: currentRemotes });
+    if (res.status === 'saved') {
+        await loadRemotes();
+        showToast(`Saved! ${currentRemotes.length} destination(s)`, 'success');
+        return true;
+    } else {
+        showToast(res.error || 'Failed', 'error');
+        return false;
+    }
+}
+
+// ═══════════════════════════════════════════════════════════
+// RAW JSON & NOTIFICATION
+// ═══════════════════════════════════════════════════════════
+async function loadCfg() {
+    try {
+        const c = await apiCall('/api/config');
+        document.getElementById('cfgEditor').value = JSON.stringify(c, null, 4);
+    } catch (e) {
+        showToast('Failed to load config: ' + e.message, 'error');
+    }
+}
+async function saveCfg() {
+    try {
+        const cfg = JSON.parse(document.getElementById('cfgEditor').value);
+        const res = await apiCall('/api/config', 'POST', cfg);
+        if (res.status === 'saved') showToast('Settings saved!', 'success');
+        else showToast(res.error || 'Failed', 'error');
+    } catch(e) { showToast('Invalid JSON: ' + e.message, 'error'); }
+}
+
+async function testNotif(channel) {
+    try {
+        const res = await apiCall('/api/notification/test', 'POST', { channel });
+        if (res.error || !res.task_id) {
+            document.getElementById('testResult').innerHTML = `<div style="color:var(--danger);">❌ ${escapeHtml(res.error || 'Notification test failed')}</div>`;
+            showToast(res.error || 'Notification test failed', 'error');
+            return;
+        }
+        document.getElementById('testResult').innerHTML = '⏳ Test sent — waiting for result...';
+        showToast(`Test sent (${channel || 'all'})`, 'info');
+        let pollCount = 0;
+        const iv = setInterval(async () => {
+            pollCount++;
+            const status = await apiCall(`/api/notification/test/status/${res.task_id}`);
+            if (status.state === 'SUCCESS' && status.results) {
+                clearInterval(iv);
+                let html = '<strong>Results:</strong><ul style="margin-top:8px;">';
+                (status.results || []).forEach(r => {
+                    html += `<li style="color:${r.success ? 'var(--success)' : 'var(--danger)'};">${r.success ? '✅' : '❌'} ${escapeHtml(r.channel)}: ${escapeHtml(r.message)}</li>`;
+                });
+                html += '</ul>';
+                document.getElementById('testResult').innerHTML = html;
+            }
+            if (status.state === 'FAILURE') {
+                clearInterval(iv);
+                document.getElementById('testResult').innerHTML = `<div style="color:var(--danger);">❌ ${escapeHtml(status.error || 'Notification test failed')}</div>`;
+            }
+            if (pollCount > 15) {
+                clearInterval(iv);
+                document.getElementById('testResult').innerHTML = '<div style="color:var(--warning);">⏳ Test timed out. Check worker logs and try again.</div>';
+            }
+        }, 1000);
+    } catch (e) {
+        document.getElementById('testResult').innerHTML = `<div style="color:var(--danger);">❌ ${escapeHtml(e.message)}</div>`;
+        showToast('Notification test failed', 'error');
+    }
+}
+
+function escapeHtml(value) {
+    return String(value)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+}
+
+// Init
+loadCfg();
+loadRemotes();
+</script>
+{% endblock %}

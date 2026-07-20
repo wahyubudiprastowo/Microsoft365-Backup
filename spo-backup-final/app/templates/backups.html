@@ -1,0 +1,373 @@
+{% extends "base.html" %}
+{% block title %}Backups{% endblock %}
+{% block page_title %}<i class="bi bi-archive-fill" style="color:var(--accent);"></i> Backup History{% endblock %}
+{% block topbar_actions %}
+<button class="btn-modern btn-primary-modern" onclick="startTenantAwareBackup()">
+    <i class="bi bi-play-fill"></i> Run Active Tenant Backup
+</button>
+{% endblock %}
+
+{% block content %}
+<div class="glass-card mb-4" style="border-color:rgba(16,185,129,0.25);">
+    <div class="card-body" style="display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap;">
+        <div style="width:44px;height:44px;border-radius:12px;background:rgba(16,185,129,0.12);display:flex;align-items:center;justify-content:center;color:var(--success);font-size:22px;">
+            <i class="bi bi-layers-fill"></i>
+        </div>
+        <div style="flex:1;min-width:260px;">
+            <div style="font-weight:700;font-size:15px;">Modern Backup Flow</div>
+            <div style="color:var(--text-muted);font-size:13px;margin-top:4px;">
+                Halaman ini adalah flow utama backup tenant-aware multi-workload. Backup layout `legacy` masih ditampilkan untuk kompatibilitas dan audit history.
+            </div>
+        </div>
+    </div>
+</div>
+<div class="glass-card mb-4" id="backupProgressPanel" style="display:none;">
+    <div class="card-header">
+        <h6><i class="bi bi-arrow-repeat spin" style="color:var(--accent);"></i> Active Backup</h6>
+        <span class="badge-modern badge-info" id="backupProgressState">RUNNING</span>
+    </div>
+    <div class="card-body">
+        <div class="row g-3 mb-3">
+            <div class="col-md-3"><div style="background:rgba(99,102,241,0.06);border:1px solid var(--border);border-radius:10px;padding:12px;">
+                <div style="font-size:10px;color:var(--text-muted);font-weight:700;text-transform:uppercase;">Files</div>
+                <div id="bpFiles" style="font-size:18px;font-weight:700;">0 / 0</div>
+            </div></div>
+            <div class="col-md-3"><div style="background:rgba(16,185,129,0.06);border:1px solid rgba(16,185,129,0.2);border-radius:10px;padding:12px;">
+                <div style="font-size:10px;color:var(--text-muted);font-weight:700;text-transform:uppercase;">Downloaded</div>
+                <div id="bpDownloaded" style="font-size:18px;font-weight:700;">0</div>
+            </div></div>
+            <div class="col-md-3"><div style="background:rgba(100,116,139,0.08);border:1px solid rgba(100,116,139,0.2);border-radius:10px;padding:12px;">
+                <div style="font-size:10px;color:var(--text-muted);font-weight:700;text-transform:uppercase;">Skipped Unchanged</div>
+                <div id="bpSkipped" style="font-size:18px;font-weight:700;">0</div>
+            </div></div>
+            <div class="col-md-3"><div style="background:rgba(6,182,212,0.08);border:1px solid rgba(6,182,212,0.2);border-radius:10px;padding:12px;">
+                <div style="font-size:10px;color:var(--text-muted);font-weight:700;text-transform:uppercase;">Resumed</div>
+                <div id="bpResumed" style="font-size:18px;font-weight:700;">0</div>
+            </div></div>
+        </div>
+        <div style="background:rgba(255,255,255,0.02);border:1px solid var(--border);border-radius:10px;padding:14px;">
+            <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:8px;">
+                <span id="bpCurrentFile" style="color:var(--text-muted);font-family:'JetBrains Mono',monospace;max-width:70%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Preparing...</span>
+                <span id="bpPct" style="color:var(--text);font-weight:600;">0%</span>
+            </div>
+            <div class="progress-modern"><div class="progress-bar-modern" id="bpBar" style="width:0%;"></div></div>
+            <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-dim);margin-top:8px;">
+                <span id="bpSpeed">0 KB/s</span>
+                <span id="bpEta">--</span>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-3 mb-4" id="statsRow">
+    <div class="col-md-3">
+        <div class="glass-card">
+            <div class="card-body">
+                <div style="font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:1px;font-weight:700;">Total Backups</div>
+                <div style="font-size:26px;font-weight:800;margin-top:4px;" id="statTotal">--</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="glass-card">
+            <div class="card-body">
+                <div style="font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:1px;font-weight:700;">Total Size</div>
+                <div style="font-size:26px;font-weight:800;margin-top:4px;color:var(--accent);" id="statSize">--</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="glass-card">
+            <div class="card-body">
+                <div style="font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:1px;font-weight:700;">Tenants</div>
+                <div style="font-size:26px;font-weight:800;margin-top:4px;color:var(--primary);" id="statTenants">--</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="glass-card">
+            <div class="card-body">
+                <div style="font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:1px;font-weight:700;">Workloads</div>
+                <div style="font-size:26px;font-weight:800;margin-top:4px;color:var(--warning);" id="statWorkloads">--</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="glass-card mb-4">
+    <div class="card-body" style="padding:14px 20px;">
+        <div class="d-flex align-items-center gap-3 flex-wrap">
+            <span style="font-size:13px;color:var(--text-muted);">Filter:</span>
+            <select id="filterTenant" onchange="applyFilters()" style="background:var(--bg-elevated);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 12px;">
+                <option value="">All Tenants</option>
+            </select>
+            <select id="filterWorkload" onchange="applyFilters()" style="background:var(--bg-elevated);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 12px;">
+                <option value="">All Workloads</option>
+                <option value="sharepoint">SharePoint</option>
+                <option value="onedrive">OneDrive</option>
+                <option value="outlook">Outlook</option>
+                <option value="teams">Teams</option>
+            </select>
+            <select id="filterLayout" onchange="applyFilters()" style="background:var(--bg-elevated);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 12px;">
+                <option value="">All Layouts</option>
+                <option value="legacy">Legacy</option>
+                <option value="tenant-aware">Tenant Aware</option>
+            </select>
+            <button class="btn-modern btn-ghost-modern" onclick="refreshList(true)" style="padding:6px 14px;font-size:12px;">
+                <i class="bi bi-arrow-clockwise"></i> Refresh
+            </button>
+        </div>
+    </div>
+</div>
+
+<div class="glass-card">
+    <div class="card-body" style="padding:0;">
+        <div id="backupsList">
+            <div style="padding:40px;text-align:center;color:var(--text-muted);">
+                <i class="bi bi-arrow-repeat spin" style="font-size:24px;"></i>
+                <div style="margin-top:10px;">Loading backups...</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+.backup-row {
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+    display: grid;
+    grid-template-columns: 1.2fr 0.8fr 1.2fr 0.8fr 0.8fr 0.8fr 52px;
+    align-items: center;
+    gap: 14px;
+    transition: background 0.2s;
+}
+.backup-row:hover {
+    background: rgba(99,102,241,0.04);
+}
+.backup-row:last-child {
+    border-bottom: none;
+}
+.badge-tenant {
+    display: inline-block;
+    background: linear-gradient(135deg, rgba(99,102,241,0.15), rgba(6,182,212,0.15));
+    color: var(--text);
+    padding: 3px 10px;
+    border-radius: 8px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+}
+.badge-workload {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 8px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+.badge-layout {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 8px;
+    font-size: 11px;
+    font-weight: 600;
+}
+.wl-sharepoint { background: rgba(0,120,212,0.15); color: #4da3e0; }
+.wl-onedrive { background: rgba(59,130,246,0.15); color: #60a5fa; }
+.wl-outlook { background: rgba(14,165,233,0.15); color: #67e8f9; }
+.wl-teams { background: rgba(98,100,167,0.18); color: #b6b7ff; }
+.layout-legacy { background: rgba(245,158,11,0.15); color: #fbbf24; }
+.layout-tenant-aware { background: rgba(16,185,129,0.15); color: #34d399; }
+
+@media (max-width: 1100px) {
+    .backup-row {
+        grid-template-columns: 1fr;
+        gap: 8px;
+    }
+}
+</style>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+let allBackups = [];
+let backupTaskId = null;
+let backupPoll = null;
+
+async function loadStats() {
+    const stats = await apiCall('/api/v2/backups/stats');
+    document.getElementById('statTotal').textContent = stats.total_backups || 0;
+    document.getElementById('statSize').textContent = stats.total_size_human || '0 B';
+    document.getElementById('statTenants').textContent = Object.keys(stats.by_tenant || {}).length;
+    document.getElementById('statWorkloads').textContent = Object.keys(stats.by_workload || {}).length;
+}
+
+async function refreshList(forceRefresh = false) {
+    try {
+        const suffix = forceRefresh ? '?refresh=1' : '';
+        const res = await apiCall('/api/v2/backups' + suffix);
+        allBackups = res.backups || [];
+
+        const tenants = [...new Set(allBackups.map(item => item.tenant_slug).filter(Boolean))];
+        const tenantFilter = document.getElementById('filterTenant');
+        const currentTenant = tenantFilter.value;
+        tenantFilter.innerHTML = '<option value="">All Tenants</option>' +
+            tenants.map(slug => `<option value="${slug}"${slug === currentTenant ? ' selected' : ''}>${slug}</option>`).join('');
+
+        applyFilters();
+        await loadStats();
+    } catch (e) {
+        document.getElementById('backupsList').innerHTML =
+            `<div style="padding:40px;text-align:center;color:var(--danger);">Error: ${e.message}</div>`;
+    }
+}
+
+function applyFilters() {
+    const tenant = document.getElementById('filterTenant').value;
+    const workload = document.getElementById('filterWorkload').value;
+    const layout = document.getElementById('filterLayout').value;
+
+    let filtered = allBackups.slice();
+    if (tenant) filtered = filtered.filter(item => item.tenant_slug === tenant);
+    if (workload) filtered = filtered.filter(item => item.workload === workload);
+    if (layout) filtered = filtered.filter(item => item.layout === layout);
+
+    if (filtered.length === 0) {
+        document.getElementById('backupsList').innerHTML = `
+            <div style="padding:60px;text-align:center;color:var(--text-dim);">
+                <i class="bi bi-inbox" style="font-size:48px;opacity:0.5;display:block;margin-bottom:10px;"></i>
+                No backups found
+            </div>`;
+        return;
+    }
+
+    let html = `<div style="padding:12px 20px;border-bottom:1px solid var(--border);background:rgba(255,255,255,0.02);display:grid;grid-template-columns:1.2fr 0.8fr 1.2fr 0.8fr 0.8fr 0.8fr 52px;gap:14px;font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.5px;">
+        <div>Tenant</div>
+        <div>Workload</div>
+        <div>Backup</div>
+        <div>Files</div>
+        <div>Size</div>
+        <div>Layout</div>
+        <div></div>
+    </div>`;
+
+    filtered.forEach(item => {
+        const workloadClass = `wl-${item.workload || 'sharepoint'}`;
+        const layoutClass = `layout-${item.layout || 'legacy'}`;
+        html += `<div class="backup-row">
+            <div>
+                <span class="badge-tenant">${escapeHtml(item.tenant_name || item.tenant_slug || 'Unknown')}</span>
+                <div style="font-size:10px;color:var(--text-dim);margin-top:2px;font-family:'JetBrains Mono',monospace;">${escapeHtml(item.tenant_slug || '-')}</div>
+            </div>
+            <div><span class="badge-workload ${workloadClass}">${escapeHtml(item.workload || 'sharepoint')}</span></div>
+            <div>
+                <div style="font-family:'JetBrains Mono',monospace;font-size:12px;">${escapeHtml(item.backup_name)}</div>
+                <div style="font-size:10px;color:var(--text-dim);margin-top:2px;">${escapeHtml(item.date)}</div>
+            </div>
+            <div style="font-weight:600;">${item.files_count || 0}</div>
+            <div style="font-weight:600;color:var(--accent);">${escapeHtml(item.size_human || '0 B')}</div>
+            <div><span class="badge-layout ${layoutClass}">${escapeHtml(item.layout || 'legacy')}</span></div>
+            <div>
+                <button class="btn-modern btn-danger-modern" onclick="deleteBackup('${encodeURIComponent(item.tenant_slug || '')}','${encodeURIComponent(item.workload || 'sharepoint')}','${encodeURIComponent(item.backup_name)}')" style="padding:4px 8px;font-size:11px;" title="Delete">
+                    <i class="bi bi-trash"></i>
+                </button>
+            </div>
+        </div>`;
+    });
+
+    document.getElementById('backupsList').innerHTML = html;
+}
+
+async function deleteBackup(tenantSlug, workload, backupName) {
+    const decodedPath = `${decodeURIComponent(tenantSlug)}/${decodeURIComponent(workload)}/${decodeURIComponent(backupName)}`;
+    if (!confirm(`Delete backup?\n\n${decodedPath}`)) return;
+
+    try {
+        const res = await fetch(`/api/v2/backups/${tenantSlug}/${workload}/${backupName}`, {
+            method: 'DELETE'
+        });
+        const data = await res.json();
+        if (data.status === 'deleted') {
+            showToast('Backup deleted', 'success');
+            refreshList(true);
+        } else {
+            showToast(data.error || 'Failed', 'error');
+        }
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+async function startTenantAwareBackup() {
+    if (!confirm('Start backup for active tenant using tenant-aware layout?')) return;
+    try {
+        const res = await apiCall('/api/v2/backup/start', 'POST', {});
+        if (res.status === 'started') {
+            backupTaskId = res.task_id;
+            showToast(`Backup started (${res.task_id.substring(0, 8)})`, 'success');
+            document.getElementById('backupProgressPanel').style.display = 'block';
+            pollBackupStatus(res.task_id);
+            if (res.warnings && res.warnings.length) {
+                res.warnings.forEach(msg => showToast(msg, 'warning'));
+            }
+            setTimeout(() => refreshList(true), 1500);
+        } else {
+            showToast(res.error || 'Failed', 'error');
+        }
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+async function checkActiveBackupTask() {
+    const res = await apiCall('/api/task/active');
+    if (res.backup_task_id) {
+        backupTaskId = res.backup_task_id;
+        document.getElementById('backupProgressPanel').style.display = 'block';
+        pollBackupStatus(res.backup_task_id);
+    }
+}
+
+function pollBackupStatus(taskId) {
+    if (backupPoll) clearInterval(backupPoll);
+    backupPoll = setInterval(async () => {
+        const data = await apiCall(`/api/backup/status/${taskId}`);
+        const m = data.meta || {};
+        document.getElementById('bpFiles').textContent = `${m.files_done || 0} / ${m.files_total || 0}`;
+        document.getElementById('bpDownloaded').textContent = (m.files_downloaded || 0).toLocaleString();
+        document.getElementById('bpSkipped').textContent = (m.files_skipped || 0).toLocaleString();
+        document.getElementById('bpResumed').textContent = (m.files_resumed || 0).toLocaleString();
+        document.getElementById('bpCurrentFile').textContent = m.current_file || m.current_site || 'Working...';
+        document.getElementById('bpPct').textContent = `${m.overall_pct || 0}%`;
+        document.getElementById('bpBar').style.width = `${m.overall_pct || 0}%`;
+        document.getElementById('bpSpeed').textContent = m.is_paused ? 'Paused' : (m.speed_human || '0 KB/s');
+        document.getElementById('bpEta').textContent = m.is_paused ? '--' : (m.eta_human || '--');
+
+        if (data.state === 'SUCCESS' || data.state === 'BACKUP_FAILED' || data.state === 'FAILURE' || data.state === 'REVOKED' || data.state === 'UNKNOWN') {
+            clearInterval(backupPoll);
+            const cancelled = data.state === 'REVOKED' || data.control_state === 'cancelled';
+            const failed = data.state === 'BACKUP_FAILED' || data.state === 'FAILURE' || data.state === 'UNKNOWN';
+            const stateEl = document.getElementById('backupProgressState');
+            stateEl.textContent = cancelled ? 'CANCELLED' : failed ? 'FAILED' : 'COMPLETED';
+            stateEl.className = cancelled ? 'badge-modern badge-warning' : failed ? 'badge-modern badge-danger' : 'badge-modern badge-success';
+            refreshList(true);
+            loadStats();
+        }
+    }, 1000);
+}
+
+function escapeHtml(value) {
+    return String(value)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+}
+
+refreshList(true);
+checkActiveBackupTask();
+setInterval(loadStats, 30000);
+</script>
+{% endblock %}

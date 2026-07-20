@@ -1,0 +1,55 @@
+<svg width="1280" height="720" viewBox="0 0 1280 720" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1280" y2="720" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0B1020"/>
+      <stop offset="1" stop-color="#0A2230"/>
+    </linearGradient>
+    <linearGradient id="card" x1="162" y1="92" x2="1120" y2="640" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1A2140"/>
+      <stop offset="1" stop-color="#10182D"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#6B6BFF"/>
+      <stop offset="1" stop-color="#27C6F7"/>
+    </linearGradient>
+    <filter id="softBlur" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="9"/>
+    </filter>
+  </defs>
+  <rect width="1280" height="720" rx="28" fill="url(#bg)"/>
+  <rect x="28" y="28" width="1224" height="664" rx="24" fill="#0D1326" stroke="#283257"/>
+  <rect x="52" y="52" width="220" height="616" rx="20" fill="#0A0F1D" stroke="#1C2442"/>
+  <rect x="78" y="82" width="48" height="48" rx="14" fill="url(#accent)"/>
+  <rect x="140" y="88" width="108" height="16" rx="8" fill="#F4F7FF" fill-opacity=".88"/>
+  <rect x="140" y="112" width="84" height="10" rx="5" fill="#A5B3D9" fill-opacity=".45"/>
+  <rect x="76" y="176" width="170" height="18" rx="9" fill="#B8C4EA" fill-opacity=".08"/>
+  <rect x="76" y="224" width="150" height="18" rx="9" fill="#B8C4EA" fill-opacity=".08"/>
+  <rect x="76" y="272" width="164" height="18" rx="9" fill="#B8C4EA" fill-opacity=".08"/>
+  <rect x="76" y="320" width="156" height="18" rx="9" fill="#6B6BFF" fill-opacity=".58"/>
+  <rect x="296" y="52" width="932" height="86" rx="20" fill="#121933" stroke="#202B4B"/>
+  <rect x="330" y="84" width="320" height="18" rx="9" fill="#F4F7FF" fill-opacity=".92"/>
+  <rect x="1072" y="76" width="122" height="38" rx="12" fill="#6B6BFF"/>
+  <rect x="296" y="162" width="932" height="506" rx="24" fill="url(#card)" stroke="#253156"/>
+  <g filter="url(#softBlur)">
+    <rect x="332" y="196" width="268" height="118" rx="18" fill="#23345D"/>
+    <rect x="622" y="196" width="268" height="118" rx="18" fill="#163C58"/>
+    <rect x="912" y="196" width="280" height="118" rx="18" fill="#293055"/>
+    <rect x="332" y="342" width="860" height="148" rx="20" fill="#18213F"/>
+    <rect x="332" y="516" width="418" height="116" rx="18" fill="#1C2647"/>
+    <rect x="774" y="516" width="418" height="116" rx="18" fill="#152A36"/>
+    <rect x="362" y="232" width="188" height="18" rx="9" fill="#FFFFFF"/>
+    <rect x="652" y="232" width="174" height="18" rx="9" fill="#BDF2FF"/>
+    <rect x="940" y="232" width="176" height="18" rx="9" fill="#FFE2A8"/>
+    <rect x="362" y="396" width="782" height="16" rx="8" fill="url(#accent)"/>
+  </g>
+  <rect x="352" y="382" width="820" height="90" rx="18" fill="#121A31" stroke="#253156"/>
+  <rect x="378" y="406" width="540" height="12" rx="6" fill="#D7E1FF" fill-opacity=".22"/>
+  <rect x="378" y="430" width="760" height="16" rx="8" fill="url(#accent)" fill-opacity=".82"/>
+  <rect x="378" y="528" width="166" height="14" rx="7" fill="#D7E1FF" fill-opacity=".18"/>
+  <rect x="378" y="556" width="320" height="14" rx="7" fill="#D7E1FF" fill-opacity=".12"/>
+  <rect x="820" y="528" width="186" height="14" rx="7" fill="#D7E1FF" fill-opacity=".18"/>
+  <rect x="820" y="556" width="298" height="14" rx="7" fill="#D7E1FF" fill-opacity=".12"/>
+  <text x="640" y="680" text-anchor="middle" fill="#B8C4EA" fill-opacity=".72" font-family="Segoe UI, Arial, sans-serif" font-size="22">
+    Blurred public-safe preview of the Microsoft 365 Backup application
+  </text>
+</svg>

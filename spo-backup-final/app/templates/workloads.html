@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+{% block title %}Workloads{% endblock %}
+{% block page_title %}<i class="bi bi-collection" style="color:var(--primary);"></i> Workloads{% endblock %}
+{% block content %}
+{% if not active_tenant %}
+<div class="glass-card"><div class="card-body" style="text-align:center;padding:48px 20px;color:var(--text-dim);">No active tenant. Add or activate a tenant first.</div></div>
+{% else %}
+<div class="glass-card mb-4">
+    <div class="card-body">
+        <strong>{{ active_tenant.name }}</strong>
+        <span style="color:var(--text-muted);margin-left:8px;">{{ active_tenant.primary_domain }}</span>
+    </div>
+</div>
+<div class="row g-4">
+    {% for wtype, meta in workload_meta.items() %}
+    {% set enabled = wtype in active_tenant.workloads_enabled %}
+    <div class="col-lg-4 col-md-6">
+        <div class="glass-card" style="{% if enabled %}border-color:{{ meta.color }};{% endif %}">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-start mb-3">
+                    <div>
+                        <h5 style="margin:0;"><i class="bi {{ meta.icon }}" style="color:{{ meta.color }};"></i> {{ meta.name }}</h5>
+                        <div style="color:var(--text-muted);font-size:13px;">{{ meta.description }}</div>
+                        {% if not meta.supports_backup %}
+                        <div style="color:var(--warning);font-size:12px;margin-top:6px;">Listed for discovery only. Full backup flow is not enabled yet.</div>
+                        {% endif %}
+                    </div>
+                    <div class="form-check form-switch"><input class="form-check-input" type="checkbox" {% if enabled %}checked{% endif %} onchange="toggleWorkload('{{ wtype }}')"></div>
+                </div>
+                <div class="d-flex flex-wrap gap-1 mb-3">
+                    {% for scope in meta.required_scopes %}
+                    <span class="badge-modern badge-info" style="font-family:'JetBrains Mono',monospace;">{{ scope }}</span>
+                    {% endfor %}
+                </div>
+                <button class="btn-modern btn-ghost-modern" style="width:100%;justify-content:center;" onclick="loadTargets('{{ wtype }}')">View Targets</button>
+            </div>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+<div class="modal fade" id="targetsModal" tabindex="-1">
+    <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content" style="background:var(--bg-elevated);border:1px solid var(--border);border-radius:16px;">
+            <div class="modal-header" style="border-bottom:1px solid var(--border);">
+                <h5 class="modal-title" id="targetsTitle">Targets</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body"><div id="targetsList">Loading...</div></div>
+        </div>
+    </div>
+</div>
+{% endif %}
+{% endblock %}
+{% block extra_js %}
+<script>
+async function toggleWorkload(wtype) {
+    const res = await apiCall(`/api/workloads/${wtype}/toggle`, 'POST');
+    if (res.status === 'toggled') showToast(`Updated ${wtype}`, 'success');
+}
+async function loadTargets(wtype) {
+    document.getElementById('targetsTitle').textContent = wtype.toUpperCase() + ' Targets';
+    document.getElementById('targetsList').innerHTML = 'Loading...';
+    new bootstrap.Modal(document.getElementById('targetsModal')).show();
+    const res = await apiCall(`/api/workloads/${wtype}/targets`);
+    if (res.error) {
+        const rawError = String(res.error_detail || res.error || '');
+        const scopes = Array.isArray(res.required_scopes) && res.required_scopes.length
+            ? `<div style="margin-top:10px;"><div style="font-size:12px;color:var(--text-muted);margin-bottom:6px;">Required scopes for this workload</div><div style="display:flex;flex-wrap:wrap;gap:6px;">${res.required_scopes.map(scope => `<span class="badge-modern badge-info" style="font-family:'JetBrains Mono',monospace;">${scope}</span>`).join('')}</div></div>`
+            : '';
+        const isPermissionIssue = res.error_type === 'permission_denied' || res.error_type === 'auth_failed';
+        if (isPermissionIssue) {
+            document.getElementById('targetsList').innerHTML = `
+                <div style="background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.24);border-radius:12px;padding:16px;">
+                    <div style="font-weight:700;color:var(--danger);margin-bottom:8px;"><i class="bi bi-shield-lock-fill"></i> Microsoft Graph Access Blocked</div>
+                    <div style="color:var(--text-muted);font-size:13px;line-height:1.6;">
+                        ${escapeHtml(res.error)}
+                        Pastikan Azure App registration tenant aktif sudah memiliki permission yang sesuai dan <b>admin consent</b> sudah diberikan.
+                    </div>
+                    ${scopes}
+                    <div style="margin-top:10px;font-size:12px;font-family:'JetBrains Mono',monospace;color:var(--text-dim);word-break:break-word;">${escapeHtml(rawError)}</div>
+                </div>`;
+        } else {
+            document.getElementById('targetsList').innerHTML = `
+                <div style="background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.24);border-radius:12px;padding:16px;">
+                    <div style="font-weight:700;color:var(--warning);margin-bottom:8px;"><i class="bi bi-exclamation-triangle-fill"></i> Target Discovery Failed</div>
+                    <div style="color:var(--text-muted);font-size:13px;line-height:1.6;">${escapeHtml(res.error)}</div>
+                    <div style="margin-top:10px;font-size:12px;font-family:'JetBrains Mono',monospace;color:var(--text-dim);word-break:break-word;">${escapeHtml(rawError)}</div>
+                </div>`;
+        }
+        return;
+    }
+    const targets = res.targets || [];
+    if (!targets.length) {
+        document.getElementById('targetsList').innerHTML = '<div style="color:var(--text-dim);">No targets found.</div>';
+        return;
+    }
+    document.getElementById('targetsList').innerHTML = `<table class="table-modern"><tbody>${targets.map(t => `
+        <tr>
+            <td><strong>${t.name || t.email || t.id}</strong>${t.email ? `<div style="font-size:12px;color:var(--text-dim);">${t.email}</div>` : ''}${t.url ? `<div style="font-size:12px;color:var(--text-dim);">${t.url}</div>` : ''}</td>
+            <td style="text-align:right;"><span class="badge-modern badge-primary">${t.type || 'target'}</span></td>
+        </tr>`).join('')}</tbody></table>`;
+}
+
+function escapeHtml(value) {
+    return String(value)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+}
+</script>
+{% endblock %}
