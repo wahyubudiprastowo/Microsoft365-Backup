@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Restore{% endblock %}
+{% block page_title %}<i class="bi bi-arrow-counterclockwise" style="color:var(--accent);"></i> Restore{% endblock %}
+{% block content %}
+<div class="glass-card"><div class="card-header"><h6><i class="bi bi-cloud-upload-fill"></i> Restore Site from Backup</h6></div>
+<div class="card-body"><form id="restoreForm" class="form-modern">
+    <div class="row g-3">
+        <div class="col-md-6"><label>Backup</label><select id="backupSel" required>
+            <option value="">-- Choose --</option>
+            {% for b in backups %}<option value="{{ b.name }}">{{ b.name }} ({{ b.date }})</option>{% endfor %}
+        </select></div>
+        <div class="col-md-6"><label>Site</label><select id="siteSel" required><option>Select backup first</option></select></div>
+        <div class="col-md-12"><label>Target Site Path (optional)</label><input type="text" id="targetPath" placeholder="Leave blank for original"></div>
+        <div class="col-12"><label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" id="dryRun" style="width:auto;"> Dry Run (simulate only)</label></div>
+    </div>
+    <div class="d-flex justify-content-end mt-3"><button type="submit" class="btn-modern btn-primary-modern"><i class="bi bi-arrow-counterclockwise"></i> Start Restore</button></div>
+</form></div></div>
+{% endblock %}
+
+{% block extra_js %}<script>
+document.getElementById('backupSel').addEventListener('change', async (e) => {
+    const sel = document.getElementById('siteSel');
+    sel.innerHTML = '<option>Loading...</option>';
+    if (!e.target.value) return;
+    const data = await apiCall(`/api/backups/${e.target.value}`);
+    sel.innerHTML = '<option value="">-- Choose --</option>';
+    (data.sites || []).forEach(s => { sel.innerHTML += `<option value="${s.display_name}">${s.display_name}</option>`; });
+});
+document.getElementById('restoreForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const res = await apiCall('/api/restore/site', 'POST', {
+        backup_name: document.getElementById('backupSel').value,
+        site_name: document.getElementById('siteSel').value,
+        target_site_path: document.getElementById('targetPath').value || null,
+        dry_run: document.getElementById('dryRun').checked,
+    });
+    if (res.task_id) showToast(`Started: ${res.task_id.substring(0,8)}`, 'success');
+});
+</script>{% endblock %}

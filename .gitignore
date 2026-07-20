@@ -1,7 +1,10 @@
 # Runtime data
-data/
-logs/
-redis/
+data/*
+!data/.gitkeep
+logs/*
+!logs/.gitkeep
+redis/*
+!redis/.gitkeep
 @eaDir/
 
 # Secrets and local config
@@ -37,7 +40,4 @@ Thumbs.db
 # Local debug / temp
 test-debug.py
 *.log
-
-# Non-public repo artifacts
-app-source/
-patch/
+docs/assets/raw/

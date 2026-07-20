@@ -4,7 +4,7 @@ This is the active deployable application behind the Microsoft 365 Backup projec
 
 If the root repository README is the product landing page, this folder is the actual engine room: web UI, task worker, scheduler, backup logic, restore flow, tenant management, and Docker deployment all live here.
 
-![Blurred UI Preview](../docs/assets/dashboard-blur.svg)
+![Operational Dashboard Preview](../docs/assets/dashboard.png)
 
 ## What This Application Actually Does
 
@@ -22,6 +22,8 @@ In short:
 
 - the root README explains the product and use case
 - this folder explains the real application that powers it
+
+All screenshots referenced from this package are taken from the running application and only sensitive areas are selectively blurred.
 
 ## What This Package Is Good At
 

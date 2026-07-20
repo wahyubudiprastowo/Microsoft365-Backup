@@ -1,0 +1,600 @@
+{% extends "base.html" %}
+{% block title %}Download{% endblock %}
+{% block page_title %}<i class="bi bi-cloud-download-fill" style="color:var(--accent);"></i> Custom Download{% endblock %}
+
+{% block content %}
+<!-- HERO -->
+<div class="glass-card mb-4" style="background:linear-gradient(135deg,rgba(99,102,241,0.1),rgba(6,182,212,0.08));border-color:var(--border-hover);">
+    <div class="card-body">
+        <div class="row align-items-center g-4">
+            <div class="col-md-2 text-center">
+                <div style="width:80px;height:80px;border-radius:20px;background:linear-gradient(135deg,var(--primary),var(--accent));display:inline-flex;align-items:center;justify-content:center;font-size:36px;color:#fff;box-shadow:0 12px 32px rgba(99,102,241,0.4);">
+                    <i class="bi bi-cloud-download-fill"></i>
+                </div>
+            </div>
+            <div class="col-md-10">
+                <h3 style="margin:0 0 6px;font-weight:700;letter-spacing:-0.02em;">Custom SharePoint Download</h3>
+                <p style="color:var(--text-muted);margin:0;font-size:14px;line-height:1.6;">
+                    Paste URL, pilih lokasi penyimpanan, dan kontrol download dengan <b style="color:var(--primary);">Pause / Resume / Cancel</b>. Mendukung resume jika file sudah terdownload sebelumnya.
+                </p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- INPUT FORM -->
+<div class="glass-card mb-4">
+    <div class="card-header">
+        <h6><i class="bi bi-link-45deg" style="color:var(--accent);"></i> Download Configuration</h6>
+    </div>
+    <div class="card-body">
+        <div class="form-modern">
+            <!-- URL Input -->
+            <label>SharePoint URL</label>
+            <div style="position:relative;margin-bottom:18px;">
+                <input type="url" id="urlInput"
+                       placeholder="https://digiservebytelkom.sharepoint.com/sites/BIRATEAM/Shared%20Documents/..."
+                       style="padding-right:120px;font-family:'JetBrains Mono',monospace;font-size:13px;">
+                <button class="btn-modern btn-ghost-modern" onclick="parseUrl()"
+                        style="position:absolute;right:6px;top:50%;transform:translateY(-50%);padding:6px 14px;font-size:12px;">
+                    <i class="bi bi-search"></i> Preview
+                </button>
+            </div>
+
+            <!-- ★ NEW: Destination Path Input ★ -->
+            <label>
+                <i class="bi bi-folder-fill" style="color:var(--warning);margin-right:4px;"></i>
+                Destination Path
+                <span style="color:var(--text-dim);font-weight:normal;font-size:11px;margin-left:6px;">(optional — auto-generated jika kosong)</span>
+            </label>
+            <div style="position:relative;margin-bottom:8px;">
+                <input type="text" id="destPath"
+                       placeholder="/volume3/spo-backup/data/my-project-x"
+                       style="padding-right:160px;font-family:'JetBrains Mono',monospace;font-size:13px;">
+                <div style="position:absolute;right:6px;top:50%;transform:translateY(-50%);display:flex;gap:4px;">
+                    <button class="btn-modern btn-ghost-modern" onclick="openPathPicker()" style="padding:6px 12px;font-size:12px;">
+                        <i class="bi bi-folder2-open"></i> Browse
+                    </button>
+                </div>
+            </div>
+            <div class="form-hint" style="margin-bottom:18px;">
+                <i class="bi bi-info-circle"></i>
+                <b>Tip:</b> Pakai path absolut <code>/volume3/...</code> atau relatif <code>my-project</code> (otomatis disimpan di backup_root).
+                <br>📁 Default backup root: <code>{{ config.backup.root_dir }}</code>
+            </div>
+
+            <!-- Quick Examples -->
+            <div style="margin-bottom:18px;">
+                <div style="font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:1px;margin-bottom:10px;">
+                    <i class="bi bi-lightbulb-fill" style="color:var(--warning);"></i> Quick Examples
+                </div>
+                <div class="d-flex flex-wrap gap-2">
+                    <button class="badge-modern badge-info" onclick="fillExample(1)" style="border:1px solid var(--border);cursor:pointer;padding:8px 14px;">
+                        <i class="bi bi-globe"></i> Whole Site
+                    </button>
+                    <button class="badge-modern badge-primary" onclick="fillExample(2)" style="border:1px solid var(--border);cursor:pointer;padding:8px 14px;">
+                        <i class="bi bi-folder-fill"></i> Document Library
+                    </button>
+                    <button class="badge-modern badge-warning" onclick="fillExample(3)" style="border:1px solid var(--border);cursor:pointer;padding:8px 14px;">
+                        <i class="bi bi-folder2-open"></i> Specific Subfolder
+                    </button>
+                </div>
+            </div>
+
+            <!-- URL Preview -->
+            <div id="urlPreviewCard" style="display:none;margin-bottom:18px;">
+                <div style="background:rgba(6,182,212,0.05);border:1px solid rgba(6,182,212,0.2);border-radius:12px;padding:16px;">
+                    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+                        <i class="bi bi-check-circle-fill" style="color:var(--accent);font-size:20px;"></i>
+                        <strong style="color:var(--text);">URL Parsed Successfully</strong>
+                    </div>
+                    <div class="row g-2" style="font-size:13px;">
+                        <div class="col-md-4"><span style="color:var(--text-dim);">Host:</span> <code id="prevHost"></code></div>
+                        <div class="col-md-4"><span style="color:var(--text-dim);">Site:</span> <code id="prevSite"></code></div>
+                        <div class="col-md-4"><span style="color:var(--text-dim);">Folder:</span> <code id="prevFolder"></code></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Submit -->
+            <div class="d-flex justify-content-end gap-2">
+                <button class="btn-modern btn-ghost-modern" onclick="clearForm()"><i class="bi bi-x-circle"></i> Clear</button>
+                <button class="btn-modern btn-primary-modern" onclick="startDownload()" id="downloadBtn">
+                    <i class="bi bi-cloud-download-fill"></i> Start Download
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ╔══════════════════════════════════════════════════════════╗ -->
+<!-- ║  PROGRESS PANEL WITH PAUSE/RESUME/CANCEL CONTROLS         ║ -->
+<!-- ╚══════════════════════════════════════════════════════════╝ -->
+<div class="glass-card mb-4" id="progressPanel" style="display:none;">
+    <div class="card-header">
+        <h6>
+            <i class="bi bi-arrow-repeat spin" id="statusIcon" style="color:var(--accent);"></i>
+            <span id="statusTitle">Download in Progress</span>
+        </h6>
+        <div class="d-flex align-items-center gap-2">
+            <span class="badge-modern badge-info" id="progressState">RUNNING</span>
+        </div>
+    </div>
+    <div class="card-body">
+        <!-- Destination Info Bar -->
+        <div style="background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.2);border-radius:10px;padding:10px 14px;margin-bottom:18px;display:flex;align-items:center;gap:10px;">
+            <i class="bi bi-folder-fill" style="color:var(--warning);font-size:16px;"></i>
+            <span style="font-size:12px;color:var(--text-muted);">Saving to:</span>
+            <code id="destPathDisplay" style="font-size:12px;color:var(--text);background:rgba(0,0,0,0.2);padding:2px 8px;border-radius:4px;">--</code>
+        </div>
+
+        <div class="row g-4 mb-4">
+            <!-- Circular Progress -->
+            <div class="col-md-4 text-center">
+                <div style="position:relative;display:inline-block;">
+                    <svg width="180" height="180" style="transform:rotate(-90deg);">
+                        <defs>
+                            <linearGradient id="progressGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                                <stop offset="0%" style="stop-color:var(--primary);"/>
+                                <stop offset="100%" style="stop-color:var(--accent);"/>
+                            </linearGradient>
+                            <linearGradient id="pausedGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                                <stop offset="0%" style="stop-color:var(--warning);"/>
+                                <stop offset="100%" style="stop-color:#fbbf24;"/>
+                            </linearGradient>
+                        </defs>
+                        <circle cx="90" cy="90" r="80" stroke="rgba(255,255,255,0.05)" stroke-width="10" fill="none"/>
+                        <circle id="progressCircle" cx="90" cy="90" r="80"
+                                stroke="url(#progressGradient)" stroke-width="10" fill="none"
+                                stroke-linecap="round" stroke-dasharray="502.65" stroke-dashoffset="502.65"
+                                style="transition:stroke-dashoffset 0.5s ease;filter:drop-shadow(0 0 8px rgba(99,102,241,0.5));"/>
+                    </svg>
+                    <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;">
+                        <div style="font-size:42px;font-weight:800;letter-spacing:-0.04em;" id="overallPctText">0<span style="font-size:24px;color:var(--text-muted);">%</span></div>
+                        <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:1.5px;font-weight:600;margin-top:-4px;">Overall</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Stats Grid -->
+            <div class="col-md-8">
+                <div class="row g-3 h-100">
+                    <div class="col-6">
+                        <div style="background:rgba(99,102,241,0.06);border:1px solid var(--border);border-radius:12px;padding:14px;">
+                            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+                                <i class="bi bi-files" style="color:var(--primary);font-size:18px;"></i>
+                                <span style="font-size:11px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px;">Files</span>
+                            </div>
+                            <div style="font-size:22px;font-weight:700;" id="filesDoneTotal">0 / 0</div>
+                        </div>
+                    </div>
+                    <div class="col-6">
+                        <div style="background:rgba(6,182,212,0.06);border:1px solid rgba(6,182,212,0.2);border-radius:12px;padding:14px;">
+                            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+                                <i class="bi bi-hdd" style="color:var(--accent);font-size:18px;"></i>
+                                <span style="font-size:11px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px;">Downloaded</span>
+                            </div>
+                            <div style="font-size:22px;font-weight:700;" id="bytesText">0 MB</div>
+                            <div style="font-size:11px;color:var(--text-dim);" id="bytesTotalText">of 0 MB</div>
+                        </div>
+                    </div>
+                    <div class="col-6">
+                        <div style="background:rgba(16,185,129,0.06);border:1px solid rgba(16,185,129,0.2);border-radius:12px;padding:14px;">
+                            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+                                <i class="bi bi-speedometer2" style="color:var(--success);font-size:18px;"></i>
+                                <span style="font-size:11px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px;">Speed</span>
+                            </div>
+                            <div style="font-size:22px;font-weight:700;" id="speedText">0 KB/s</div>
+                        </div>
+                    </div>
+                    <div class="col-6">
+                        <div style="background:rgba(245,158,11,0.06);border:1px solid rgba(245,158,11,0.2);border-radius:12px;padding:14px;">
+                            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+                                <i class="bi bi-clock-history" style="color:var(--warning);font-size:18px;"></i>
+                                <span style="font-size:11px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px;">ETA</span>
+                            </div>
+                            <div style="font-size:22px;font-weight:700;" id="etaText">--</div>
+                            <div style="font-size:11px;color:var(--text-dim);">Elapsed <span id="elapsedText">0s</span></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Per-File Progress -->
+        <div style="background:rgba(255,255,255,0.02);border:1px solid var(--border);border-radius:12px;padding:18px;margin-bottom:18px;">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+                <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+                    <i class="bi bi-file-earmark-arrow-down-fill" style="color:var(--primary);font-size:18px;flex-shrink:0;"></i>
+                    <div style="min-width:0;flex:1;">
+                        <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;font-weight:700;">Current File</div>
+                        <div id="currentFileName" style="font-size:14px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:'JetBrains Mono',monospace;">Preparing...</div>
+                    </div>
+                </div>
+                <div style="text-align:right;flex-shrink:0;margin-left:16px;">
+                    <div style="font-size:20px;font-weight:700;" id="fileSizePctText">0%</div>
+                    <div style="font-size:11px;color:var(--text-dim);" id="fileSizeText">0 / 0</div>
+                </div>
+            </div>
+            <div class="progress-modern thin">
+                <div class="progress-bar-modern" id="fileProgressBar" style="width:0%;"></div>
+            </div>
+        </div>
+
+        <!-- ╔══════════════════════════════════════════════════╗ -->
+        <!-- ║  ★ CONTROL BUTTONS — PAUSE / RESUME / CANCEL ★    ║ -->
+        <!-- ╚══════════════════════════════════════════════════╝ -->
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:14px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:12px;">
+            <div style="display:flex;align-items:center;gap:12px;">
+                <i class="bi bi-shield-check" style="color:var(--success);font-size:18px;"></i>
+                <span style="font-size:13px;color:var(--text-muted);">
+                    Control task: <code id="currentTaskIdDisplay" style="color:var(--primary);">--</code>
+                </span>
+            </div>
+            <div class="d-flex gap-2" id="controlButtons">
+                <!-- PAUSE button -->
+                <button class="btn-modern" onclick="pauseTask()" id="pauseBtn"
+                        style="background:rgba(245,158,11,0.15);color:var(--warning);border:1px solid rgba(245,158,11,0.3);">
+                    <i class="bi bi-pause-fill"></i> Pause
+                </button>
+                <!-- RESUME button -->
+                <button class="btn-modern" onclick="resumeTask()" id="resumeBtn"
+                        style="background:rgba(16,185,129,0.15);color:var(--success);border:1px solid rgba(16,185,129,0.3);display:none;">
+                    <i class="bi bi-play-fill"></i> Resume
+                </button>
+                <!-- CANCEL button -->
+                <button class="btn-modern btn-danger-modern" onclick="cancelTask()" id="cancelBtn">
+                    <i class="bi bi-x-circle-fill"></i> Cancel
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- SUCCESS PANEL -->
+<div class="glass-card mb-4" id="successPanel" style="display:none;">
+    <div class="card-body text-center" style="padding:40px;">
+        <div id="successIcon" style="width:80px;height:80px;border-radius:50%;background:linear-gradient(135deg,var(--success),#34d399);display:inline-flex;align-items:center;justify-content:center;font-size:40px;color:#fff;box-shadow:0 12px 32px rgba(16,185,129,0.4);margin-bottom:20px;">
+            <i class="bi bi-check-lg"></i>
+        </div>
+        <h3 id="successTitle" style="font-weight:700;margin-bottom:8px;">Download Complete!</h3>
+        <p style="color:var(--text-muted);margin-bottom:24px;" id="successMessage"></p>
+        <div class="row g-3 justify-content-center" id="successStats" style="max-width:600px;margin:0 auto;"></div>
+    </div>
+</div>
+
+<!-- ╔══════════════════════════════════════════════════════════╗ -->
+<!-- ║  PATH PICKER MODAL                                        ║ -->
+<!-- ╚══════════════════════════════════════════════════════════╝ -->
+<div class="modal fade" id="pathPickerModal" tabindex="-1">
+    <div class="modal-dialog modal-lg modal-dialog-centered">
+        <div class="modal-content" style="background:var(--bg-elevated);border:1px solid var(--border);border-radius:16px;">
+            <div class="modal-header" style="border-bottom:1px solid var(--border);">
+                <h5 class="modal-title" style="color:var(--text);font-weight:600;">
+                    <i class="bi bi-folder2-open" style="color:var(--accent);"></i>
+                    Browse Destination Path
+                </h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <!-- Current Path Bar -->
+                <div style="background:rgba(99,102,241,0.06);border:1px solid var(--border);border-radius:10px;padding:10px 14px;margin-bottom:14px;display:flex;align-items:center;gap:10px;">
+                    <button class="btn-modern btn-ghost-modern" onclick="goUp()" style="padding:6px 10px;">
+                        <i class="bi bi-arrow-up"></i>
+                    </button>
+                    <code id="currentPath" style="flex:1;color:var(--text);font-size:13px;">/backup/sharepoint</code>
+                    <button class="btn-modern btn-ghost-modern" onclick="refreshPath()" style="padding:6px 10px;">
+                        <i class="bi bi-arrow-clockwise"></i>
+                    </button>
+                </div>
+
+                <!-- Quick Roots -->
+                <div style="margin-bottom:14px;">
+                    <div style="font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;">Quick Access</div>
+                    <div class="d-flex flex-wrap gap-2">
+                        <button class="badge-modern badge-info" onclick="navTo('/backup/sharepoint')" style="border:1px solid var(--border);cursor:pointer;padding:6px 12px;">
+                            <i class="bi bi-archive"></i> Backup Root
+                        </button>
+                        <button class="badge-modern badge-primary" onclick="navTo('/volume3')" style="border:1px solid var(--border);cursor:pointer;padding:6px 12px;">
+                            <i class="bi bi-hdd"></i> /volume3 (30TB)
+                        </button>
+                        <button class="badge-modern badge-warning" onclick="navTo('/volume2')" style="border:1px solid var(--border);cursor:pointer;padding:6px 12px;">
+                            <i class="bi bi-hdd"></i> /volume2 (4.8TB)
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Directory List -->
+                <div id="dirList" style="background:rgba(0,0,0,0.2);border:1px solid var(--border);border-radius:10px;max-height:350px;overflow-y:auto;padding:6px;">
+                    Loading...
+                </div>
+
+                <!-- New Folder Input -->
+                <div style="margin-top:14px;display:flex;gap:8px;">
+                    <input type="text" id="newFolderName" placeholder="New folder name..."
+                           style="flex:1;background:rgba(15,21,38,0.8);border:1px solid var(--border);border-radius:10px;padding:10px 12px;color:var(--text);font-size:13px;">
+                    <button class="btn-modern btn-ghost-modern" onclick="createFolder()" style="padding:8px 14px;">
+                        <i class="bi bi-folder-plus"></i> Create
+                    </button>
+                </div>
+            </div>
+            <div class="modal-footer" style="border-top:1px solid var(--border);">
+                <button class="btn-modern btn-ghost-modern" data-bs-dismiss="modal">Cancel</button>
+                <button class="btn-modern btn-primary-modern" onclick="selectPath()">
+                    <i class="bi bi-check-lg"></i> Use This Path
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const HOST = '{{ config.sharepoint.host }}';
+const EXAMPLES = {
+    1: `https://${HOST}/sites/BIRATEAM`,
+    2: `https://${HOST}/sites/BIRATEAM/Shared%20Documents`,
+    3: `https://${HOST}/sites/BIRATEAM/Shared%20Documents/Forms/AllItems.aspx?id=/sites/BIRATEAM/Shared%20Documents/Reports/2026`,
+};
+
+let currentTaskId = null;
+let pollInterval = null;
+let pathPickerCurrent = '/backup/sharepoint';
+
+function fillExample(n) {
+    document.getElementById('urlInput').value = EXAMPLES[n];
+    parseUrl();
+}
+
+function clearForm() {
+    document.getElementById('urlInput').value = '';
+    document.getElementById('destPath').value = '';
+    document.getElementById('urlPreviewCard').style.display = 'none';
+}
+
+async function parseUrl() {
+    const url = document.getElementById('urlInput').value.trim();
+    if (!url) return showToast('URL required', 'warning');
+    const res = await apiCall('/api/download/parse', 'POST', { url });
+    if (res.status === 'ok') {
+        const p = res.parsed;
+        document.getElementById('prevHost').textContent = p.host;
+        document.getElementById('prevSite').textContent = p.site_path || '(root)';
+        document.getElementById('prevFolder').textContent = p.folder_path || '(all libraries)';
+        document.getElementById('urlPreviewCard').style.display = 'block';
+        showToast('URL parsed', 'success');
+    } else {
+        showToast(res.error || 'Failed', 'error');
+    }
+}
+
+async function startDownload() {
+    const url = document.getElementById('urlInput').value.trim();
+    const destPath = document.getElementById('destPath').value.trim();
+    if (!url) return showToast('URL required', 'warning');
+
+    const btn = document.getElementById('downloadBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="bi bi-arrow-repeat spin"></i> Starting...';
+
+    const res = await apiCall('/api/download/url', 'POST', {
+        url, dest_dir: destPath || null
+    });
+
+    if (res.task_id) {
+        currentTaskId = res.task_id;
+        document.getElementById('currentTaskIdDisplay').textContent = res.task_id.substring(0, 8);
+        showToast(`Started: ${res.task_id.substring(0, 8)}`, 'success');
+        document.getElementById('progressPanel').style.display = 'block';
+        document.getElementById('successPanel').style.display = 'none';
+        document.getElementById('progressPanel').scrollIntoView({ behavior: 'smooth' });
+        pollDownloadStatus(res.task_id);
+    } else {
+        showToast(res.error || 'Failed to start', 'error');
+        resetDownloadBtn();
+    }
+}
+
+function pollDownloadStatus(taskId) {
+    if (pollInterval) clearInterval(pollInterval);
+    pollInterval = setInterval(async () => {
+        try {
+            const data = await apiCall(`/api/download/status/${taskId}`);
+            updateProgressUI(data);
+            updateControlUI(data.control_state || 'running');
+
+            if (data.state === 'SUCCESS') {
+                clearInterval(pollInterval);
+                showSuccess(data.result);
+                resetDownloadBtn();
+            }
+            if (data.state === 'FAILURE') {
+                clearInterval(pollInterval);
+                document.getElementById('progressState').textContent = 'FAILED';
+                document.getElementById('progressState').className = 'badge-modern badge-danger';
+                showToast('Failed: ' + (data.error || 'Unknown'), 'error');
+                resetDownloadBtn();
+            }
+        } catch (e) { console.error(e); }
+    }, 1000);
+}
+
+function updateProgressUI(data) {
+    const m = data.meta || {};
+    const overallPct = m.overall_pct || 0;
+    const circumference = 2 * Math.PI * 80;
+    document.getElementById('progressCircle').setAttribute('stroke-dashoffset',
+        circumference - (overallPct / 100 * circumference));
+    document.getElementById('overallPctText').innerHTML =
+        overallPct + '<span style="font-size:24px;color:var(--text-muted);">%</span>';
+    document.getElementById('filesDoneTotal').textContent = `${m.files_done || 0} / ${m.files_total || 0}`;
+    document.getElementById('bytesText').textContent = formatBytes(m.bytes_done || 0);
+    document.getElementById('bytesTotalText').textContent = 'of ' + formatBytes(m.bytes_total || 0);
+    document.getElementById('speedText').textContent = m.is_paused ? '⏸ Paused' : (m.speed_human || '0 KB/s');
+    document.getElementById('etaText').textContent = m.is_paused ? '--' : (m.eta_human || '--');
+    document.getElementById('elapsedText').textContent = formatElapsed(m.elapsed || 0);
+    document.getElementById('currentFileName').textContent = m.current_file || 'Enumerating...';
+    document.getElementById('fileSizePctText').textContent = (m.file_pct || 0) + '%';
+    document.getElementById('fileSizeText').textContent =
+        `${formatBytes(m.current_file_done || 0)} / ${formatBytes(m.current_file_size || 0)}`;
+    document.getElementById('fileProgressBar').style.width = (m.file_pct || 0) + '%';
+
+    // Destination
+    if (m.dest) {
+        document.getElementById('destPathDisplay').textContent = m.dest;
+    }
+}
+
+function updateControlUI(state) {
+    const pauseBtn = document.getElementById('pauseBtn');
+    const resumeBtn = document.getElementById('resumeBtn');
+    const stateBadge = document.getElementById('progressState');
+    const statusTitle = document.getElementById('statusTitle');
+    const statusIcon = document.getElementById('statusIcon');
+    const circle = document.getElementById('progressCircle');
+
+    if (state === 'paused') {
+        pauseBtn.style.display = 'none';
+        resumeBtn.style.display = 'inline-flex';
+        stateBadge.textContent = 'PAUSED';
+        stateBadge.className = 'badge-modern badge-warning';
+        statusTitle.textContent = 'Download Paused';
+        statusIcon.className = 'bi bi-pause-circle-fill';
+        statusIcon.style.color = 'var(--warning)';
+        circle.setAttribute('stroke', 'url(#pausedGradient)');
+    } else if (state === 'cancelled') {
+        pauseBtn.style.display = 'none';
+        resumeBtn.style.display = 'none';
+        stateBadge.textContent = 'CANCELLED';
+        stateBadge.className = 'badge-modern badge-danger';
+        statusTitle.textContent = 'Download Cancelled';
+    } else {
+        pauseBtn.style.display = 'inline-flex';
+        resumeBtn.style.display = 'none';
+        stateBadge.textContent = 'RUNNING';
+        stateBadge.className = 'badge-modern badge-info';
+        statusTitle.textContent = 'Download in Progress';
+        statusIcon.className = 'bi bi-arrow-repeat spin';
+        statusIcon.style.color = 'var(--accent)';
+        circle.setAttribute('stroke', 'url(#progressGradient)');
+    }
+}
+
+// ★ PAUSE/RESUME/CANCEL ★
+async function pauseTask() {
+    if (!currentTaskId) return;
+    const res = await apiCall(`/api/task/${currentTaskId}/pause`, 'POST');
+    if (res.status === 'paused') showToast('Download paused', 'warning');
+}
+
+async function resumeTask() {
+    if (!currentTaskId) return;
+    const res = await apiCall(`/api/task/${currentTaskId}/resume`, 'POST');
+    if (res.status === 'resumed') showToast('Download resumed', 'success');
+}
+
+async function cancelTask() {
+    if (!currentTaskId) return;
+    if (!confirm('Cancel this download? Progress will be saved (can resume by re-running).')) return;
+    const res = await apiCall(`/api/task/${currentTaskId}/cancel`, 'POST');
+    if (res.status === 'cancelled') showToast('Download cancelled', 'info');
+}
+
+function formatElapsed(sec) {
+    if (sec < 60) return sec + 's';
+    if (sec < 3600) return Math.floor(sec / 60) + 'm ' + (sec % 60) + 's';
+    return Math.floor(sec / 3600) + 'h ' + Math.floor((sec % 3600) / 60) + 'm';
+}
+
+function showSuccess(result) {
+    document.getElementById('progressState').textContent = 'COMPLETED';
+    document.getElementById('progressState').className = 'badge-modern badge-success';
+    document.getElementById('successPanel').style.display = 'block';
+    const r = result || {};
+    document.getElementById('successMessage').textContent =
+        `Downloaded ${r.downloaded} of ${r.total} files (${formatBytes(r.bytes || 0)})`;
+    const stats = [
+        { label: 'Files', value: r.downloaded || 0, icon: 'files', color: 'primary' },
+        { label: 'Size', value: formatBytes(r.bytes || 0), icon: 'hdd', color: 'accent' },
+        { label: 'Saved To', value: (r.dest || '').split('/').slice(-2).join('/'), icon: 'folder-fill', color: 'success' },
+    ];
+    document.getElementById('successStats').innerHTML = stats.map(s => `
+        <div class="col-md-4">
+            <div style="background:rgba(99,102,241,0.06);border:1px solid var(--border);border-radius:12px;padding:14px;text-align:center;">
+                <i class="bi bi-${s.icon}" style="font-size:22px;color:var(--${s.color});"></i>
+                <div style="font-size:18px;font-weight:700;margin-top:6px;">${s.value}</div>
+                <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-top:2px;">${s.label}</div>
+            </div>
+        </div>
+    `).join('');
+    showToast('Download completed!', 'success');
+}
+
+function resetDownloadBtn() {
+    const btn = document.getElementById('downloadBtn');
+    btn.disabled = false;
+    btn.innerHTML = '<i class="bi bi-cloud-download-fill"></i> Start Download';
+}
+
+// ╔════════════════════════════════════════╗
+// ║ PATH PICKER                            ║
+// ╚════════════════════════════════════════╝
+function openPathPicker() {
+    new bootstrap.Modal(document.getElementById('pathPickerModal')).show();
+    navTo(pathPickerCurrent);
+}
+
+async function navTo(path) {
+    pathPickerCurrent = path;
+    document.getElementById('currentPath').textContent = path;
+    document.getElementById('dirList').innerHTML = '<div style="padding:30px;text-align:center;color:var(--text-muted);"><i class="bi bi-arrow-repeat spin"></i> Loading...</div>';
+    const r = await fetch(`/api/browse?path=${encodeURIComponent(path)}`);
+    const data = await r.json();
+    if (data.error) {
+        document.getElementById('dirList').innerHTML = `<div style="padding:30px;text-align:center;color:var(--danger);"><i class="bi bi-exclamation-triangle"></i> ${data.error}</div>`;
+        return;
+    }
+    if (data.items.length === 0) {
+        document.getElementById('dirList').innerHTML = '<div style="padding:30px;text-align:center;color:var(--text-dim);">No subdirectories</div>';
+        return;
+    }
+    document.getElementById('dirList').innerHTML = data.items.map(item => `
+        <div onclick="navTo('${item.path}')" style="display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:8px;cursor:pointer;transition:background 0.2s;color:var(--text);" 
+             onmouseover="this.style.background='rgba(99,102,241,0.08)'" onmouseout="this.style.background='transparent'">
+            <i class="bi bi-folder-fill" style="color:var(--accent);font-size:16px;"></i>
+            <span style="font-family:'JetBrains Mono',monospace;font-size:13px;">${item.name}</span>
+        </div>
+    `).join('');
+}
+
+function goUp() {
+    const parts = pathPickerCurrent.split('/');
+    parts.pop();
+    const parent = parts.join('/') || '/';
+    if (parent !== pathPickerCurrent) navTo(parent);
+}
+
+function refreshPath() { navTo(pathPickerCurrent); }
+
+function selectPath() {
+    document.getElementById('destPath').value = pathPickerCurrent;
+    bootstrap.Modal.getInstance(document.getElementById('pathPickerModal')).hide();
+    showToast('Path selected: ' + pathPickerCurrent, 'success');
+}
+
+async function createFolder() {
+    const name = document.getElementById('newFolderName').value.trim();
+    if (!name) return showToast('Folder name required', 'warning');
+    const path = pathPickerCurrent + '/' + name;
+    const r = await apiCall('/api/browse/mkdir', 'POST', { path });
+    if (r.status === 'created') {
+        showToast('Folder created: ' + name, 'success');
+        document.getElementById('newFolderName').value = '';
+        navTo(pathPickerCurrent);
+    } else {
+        showToast(r.error || 'Failed', 'error');
+    }
+}
+</script>
+{% endblock %}

@@ -47,7 +47,7 @@ The current product direction is centered on SharePoint backup execution, while 
 
 The product ships with a modern operational dashboard for monitoring active jobs, viewing backup statistics, and navigating tenants, workloads, restore, logs, and schedules.
 
-![Microsoft 365 Backup Dashboard](docs/assets/dashboard-blur.svg)
+![Microsoft 365 Backup Dashboard](docs/assets/dashboard.png)
 
 Primary dashboard capabilities:
 
@@ -182,17 +182,17 @@ m365backup/
 
 Dashboard and active backup monitoring:
 
-![Microsoft 365 Backup Dashboard](docs/assets/dashboard-blur.svg)
+![Microsoft 365 Backup Dashboard](docs/assets/dashboard.png)
 
-Repository and platform overview:
+Backup history and inventory page:
 
-![Microsoft 365 Backup Overview](docs/assets/repo-preview.svg)
+![Microsoft 365 Backup History](docs/assets/backups.png)
 
 Restore and recovery operations preview:
 
-![Microsoft 365 Backup Restore](docs/assets/restore-blur.svg)
+![Microsoft 365 Backup Restore](docs/assets/restore.png)
 
-> Screenshots in the repository are intentionally blurred/public-safe to avoid exposing tenant names, operator identities, backup targets, or live customer data.
+> Screenshots in the repository are captured from the real running application, with only sensitive areas selectively blurred to protect tenant names, operator identity, task identifiers, and environment-specific details.
 
 ## Why Choose This Project
 

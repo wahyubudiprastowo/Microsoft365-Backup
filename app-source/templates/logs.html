@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Logs{% endblock %}
+{% block page_title %}<i class="bi bi-terminal-fill" style="color:var(--accent);"></i> System Logs{% endblock %}
+{% block content %}
+<div class="glass-card"><div class="card-header"><h6><i class="bi bi-terminal"></i> Recent Activity</h6>
+<button class="btn-modern btn-ghost-modern" onclick="refresh()" style="padding:6px 14px;font-size:12px;"><i class="bi bi-arrow-clockwise"></i> Refresh</button></div>
+<div class="card-body p-0"><div class="log-viewer" id="logViewer" style="border-radius:0;border:none;max-height:700px;">
+{% for line in logs %}<div class="{% if 'ERROR' in line %}log-error{% elif 'WARNING' in line %}log-warn{% elif '✅' in line %}log-success{% else %}log-info{% endif %}">{{ line }}</div>{% endfor %}
+</div></div></div>
+{% endblock %}
+
+{% block extra_js %}<script>
+async function refresh() {
+    const d = await apiCall('/api/logs?lines=200');
+    const v = document.getElementById('logViewer');
+    if (d.logs) {
+        v.innerHTML = d.logs.map(l => {
+            let cls = 'log-info';
+            if (l.includes('ERROR')) cls = 'log-error';
+            else if (l.includes('WARNING')) cls = 'log-warn';
+            else if (l.includes('✅')) cls = 'log-success';
+            return `<div class="${cls}">${l}</div>`;
+        }).join('');
+        v.scrollTop = v.scrollHeight;
+    }
+}
+setInterval(refresh, 5000);
+document.getElementById('logViewer').scrollTop = 99999;
+</script>{% endblock %}
