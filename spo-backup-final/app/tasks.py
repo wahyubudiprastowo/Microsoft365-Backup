@@ -2,6 +2,7 @@
 import logging
 import os
 import json
+from pathlib import Path
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from celery import Celery
@@ -12,6 +13,8 @@ from celery.signals import worker_process_init
 from app.config_manager import load_config
 from app.backup_engine import BackupEngine, RestoreEngine
 from app.notifier import NotificationDispatcher
+from app.operation_dispatcher import dispatch_next_queued_operation
+from app.task_runtime_lease import LocalProcessSlot, TaskRuntimeLease
 from app.workloads import BACKUP_ENABLED_WORKLOADS, filter_backup_workloads
 
 try:
@@ -41,6 +44,19 @@ def setup_file_logger():
 
 
 log = setup_file_logger()
+
+
+def _dispatch_after_backup_completion():
+    try:
+        from app.main import maybe_dispatch_queued_operations
+
+        maybe_dispatch_queued_operations()
+    except Exception as e:
+        log.warning(f"Failed to run post-backup queue dispatch: {e}")
+        try:
+            dispatch_next_queued_operation("backup")
+        except Exception:
+            pass
 
 
 def _write_workload_manifest(backup_path: str, workload_name: str, stats: dict, tenant: dict | None, layout: str):
@@ -101,11 +117,17 @@ celery_app.conf.update(
     timezone="Asia/Jakarta", enable_utc=True, task_track_started=True,
     result_expires=86400,
     broker_connection_retry_on_startup=True,
+    # Backups can run for many hours; keep Redis from redelivering the same
+    # unacked task while the original worker is still legitimately processing it.
+    broker_transport_options={"visibility_timeout": 604800},
     # Long-running backup/download tasks should be redelivered after worker/broker loss.
     task_acks_late=True,
     task_reject_on_worker_lost=True,
     worker_cancel_long_running_tasks_on_connection_loss=True,
     worker_prefetch_multiplier=1,
+    task_routes={
+        "app.tasks.execute_restore_job_v2": {"queue": "restore"},
+    },
 )
 
 # ═══════════════════════════════════════════════════════════════
@@ -157,6 +179,19 @@ def run_backup_task(self, custom_root: str = None, tenant_id: str = None, worklo
         raise ValueError(f"Current backup engine only supports workloads: {supported_names}")
 
     task_id = self.request.id
+    runtime_lease = TaskRuntimeLease("backup", task_id, ttl_seconds=900)
+    if not runtime_lease.acquire():
+        log.warning(f"Duplicate backup task execution suppressed for {task_id[:8]}")
+        raise Ignore()
+    process_slot = LocalProcessSlot("backup")
+    if not process_slot.acquire():
+        log.warning(f"Backup process slot already occupied; suppressing duplicate/parallel execution for {task_id[:8]}")
+        try:
+            runtime_lease.release()
+        except Exception:
+            pass
+        raise Ignore()
+
     log.info("=" * 60)
     log.info(f"BACKUP STARTED — Task: {task_id[:8]}")
     if tenant_id:
@@ -172,6 +207,7 @@ def run_backup_task(self, custom_root: str = None, tenant_id: str = None, worklo
     r.setex(f"spo:task:{task_id}:control", 86400, "running")
 
     def progress_cb(evt, data):
+        runtime_lease.refresh()
         if evt == "site_start":
             log.info(f"→ Backing up: {data.get('current_site', '?')}")
         elif evt == "site_done":
@@ -315,6 +351,7 @@ def run_backup_task(self, custom_root: str = None, tenant_id: str = None, worklo
             log.warning(f"⛔ Backup task {task_id[:8]} was CANCELLED")
             r.delete("spo:current_backup_task")
             r.delete(f"spo:task:{task_id}:control")
+            _dispatch_after_backup_completion()
             return stats
 
         fatal_errors = [str(err) for err in stats.get("errors", []) if str(err).startswith("Fatal:")]
@@ -353,17 +390,27 @@ def run_backup_task(self, custom_root: str = None, tenant_id: str = None, worklo
                     log.info("=" * 60)
                     log.info(f"UPLOADING {len(upload_sources)} BACKUP SET(S) TO {len(enabled_dests)} REMOTE DESTINATION(S)")
                     log.info("=" * 60)
+                    backup_root_path = Path(config["backup"]["root_dir"]).resolve()
                     upload_results = []
                     for workload_name, local_backup_dir in upload_sources:
                         log.info(f"Source workload: {workload_name} — {local_backup_dir}")
+                        local_backup_path = Path(local_backup_dir).resolve()
+                        try:
+                            remote_subpath = str(local_backup_path.relative_to(backup_root_path)).replace("\\", "/").strip("/")
+                        except ValueError:
+                            remote_subpath = local_backup_path.name
                         for dest in enabled_dests:
                             proto = dest.get("protocol", "?").upper()
                             name = dest.get("name", "unnamed")
                             log.info(f"→ Uploading via {proto} to '{name}'...")
+                            if remote_subpath:
+                                log.info(f"  Remote target suffix: {remote_subpath}")
                             try:
-                                result = upload_to_remote(dest, local_backup_dir)
+                                result = upload_to_remote(dest, local_backup_dir, remote_subpath=remote_subpath)
                                 log.info(f"  ✅ {name}: {result.get('uploaded', 0)} files, "
                                          f"{result.get('bytes', 0) / 1024 / 1024:.2f} MB")
+                                if result.get("remote_path"):
+                                    log.info(f"  Remote path: {result.get('remote_path')}")
                                 upload_results.append({
                                     "workload": workload_name,
                                     "source": local_backup_dir,
@@ -372,9 +419,15 @@ def run_backup_task(self, custom_root: str = None, tenant_id: str = None, worklo
                                     "status": "success",
                                     "uploaded": result.get("uploaded", 0),
                                     "bytes": result.get("bytes", 0),
+                                    "remote_path": result.get("remote_path"),
+                                    "remote_subpath": remote_subpath,
                                 })
                             except Exception as e:
                                 log.error(f"  ❌ {name} failed: {e}")
+                                base_remote_path = str((dest.get("config") or {}).get("remote_path") or "/").replace("\\", "/").rstrip("/")
+                                if not base_remote_path:
+                                    base_remote_path = "/"
+                                remote_target = f"{base_remote_path}/{remote_subpath}".replace("//", "/") if remote_subpath else base_remote_path
                                 upload_results.append({
                                     "workload": workload_name,
                                     "source": local_backup_dir,
@@ -382,6 +435,8 @@ def run_backup_task(self, custom_root: str = None, tenant_id: str = None, worklo
                                     "protocol": proto,
                                     "status": "failed",
                                     "error": str(e),
+                                    "remote_path": remote_target,
+                                    "remote_subpath": remote_subpath,
                                 })
                     stats["remote_uploads"] = upload_results
 
@@ -398,6 +453,7 @@ def run_backup_task(self, custom_root: str = None, tenant_id: str = None, worklo
 
         r.delete("spo:current_backup_task")
         r.delete(f"spo:task:{task_id}:control")
+        _dispatch_after_backup_completion()
         if task_failure:
             self.update_state(state="BACKUP_FAILED", meta=stats)
             raise Ignore()
@@ -420,13 +476,28 @@ def run_backup_task(self, custom_root: str = None, tenant_id: str = None, worklo
         log.error(f"BACKUP TASK FAILED: {e}", exc_info=True)
         r.delete("spo:current_backup_task")
         r.delete(f"spo:task:{task_id}:control")
+        _dispatch_after_backup_completion()
         raise
+    finally:
+        try:
+            process_slot.release()
+        except Exception:
+            pass
+        try:
+            runtime_lease.release()
+        except Exception:
+            pass
 
 
 @celery_app.task(bind=True, name="app.tasks.download_custom_url_task")
 def download_custom_url_task(self, url: str, dest_dir: str = None):
     config = load_config()
     task_id = self.request.id
+    runtime_lease = TaskRuntimeLease("download", task_id, ttl_seconds=900)
+    if not runtime_lease.acquire():
+        log.warning(f"Duplicate download task execution suppressed for {task_id[:8]}")
+        raise Ignore()
+
     log.info("=" * 60)
     log.info(f"CUSTOM DOWNLOAD — Task: {task_id[:8]}")
     log.info(f"  URL : {url}")
@@ -438,6 +509,7 @@ def download_custom_url_task(self, url: str, dest_dir: str = None):
     r.setex(f"spo:task:{task_id}:control", 86400, "running")
 
     def progress_cb(evt, data):
+        runtime_lease.refresh()
         if evt == "file_done":
             fname = data.get("current_file", "")
             if fname:
@@ -450,12 +522,19 @@ def download_custom_url_task(self, url: str, dest_dir: str = None):
         log.info(f"DOWNLOAD COMPLETED — {result.get('downloaded', 0)} files")
         r.delete("spo:current_download_task")
         r.delete(f"spo:task:{task_id}:control")
+        dispatch_next_queued_operation("download")
         return result
     except Exception as e:
         log.error(f"DOWNLOAD FAILED: {e}", exc_info=True)
         r.delete("spo:current_download_task")
         r.delete(f"spo:task:{task_id}:control")
+        dispatch_next_queued_operation("download")
         raise
+    finally:
+        try:
+            runtime_lease.release()
+        except Exception:
+            pass
 
 
 @celery_app.task(bind=True, name="app.tasks.run_restore_task")

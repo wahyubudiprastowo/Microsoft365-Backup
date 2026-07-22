@@ -2,6 +2,7 @@
 from flask import jsonify, request
 
 from app.backup_registry import BackupRegistry
+from app.operation_queue import OperationQueue
 from app.tenant_manager import TenantManager
 from app.workloads import BACKUP_ENABLED_WORKLOADS, filter_backup_workloads
 
@@ -12,16 +13,53 @@ def register_v11_routes(app):
     registry = BackupRegistry()
     tm = TenantManager()
 
+    def _apply_active_backup_overlay(backups: list) -> tuple[list, dict | None]:
+        try:
+            from app.main import get_active_task_overlay
+
+            active_backup = get_active_task_overlay("backup", prefer_disk_size=True)
+        except Exception:
+            active_backup = None
+
+        if not active_backup:
+            return backups, None
+
+        active_meta = active_backup.get("meta") or {}
+        active_path = active_meta.get("backup_path")
+        if not active_path:
+            return backups, active_backup
+
+        live_size = int(active_backup.get("live_size_bytes") or 0)
+        for item in backups:
+            if item.get("backup_path") != active_path:
+                continue
+            if live_size > int(item.get("size_bytes") or 0):
+                item["size_bytes"] = live_size
+                item["size_human"] = registry._format_size(live_size)
+            item["status"] = "running"
+            break
+        return backups, active_backup
+
     @app.route("/api/v2/backups")
     def list_backups_v2():
         tenant_slug = request.args.get("tenant_slug", "").strip()
         workload = request.args.get("workload", "").strip()
         backups = registry.list_all(use_cache=request.args.get("refresh") != "1")
+        backups, active_backup = _apply_active_backup_overlay(backups)
         if tenant_slug:
             backups = [item for item in backups if item["tenant_slug"] == tenant_slug]
         if workload:
             backups = [item for item in backups if item["workload"] == workload]
-        return jsonify({"backups": backups, "total": len(backups)})
+        return jsonify({
+            "backups": backups,
+            "total": len(backups),
+            "active_backup": {
+                "task_id": active_backup.get("task_id"),
+                "backup_path": (active_backup.get("meta") or {}).get("backup_path"),
+                "live_size_bytes": active_backup.get("live_size_bytes", 0),
+                "live_size_human": active_backup.get("live_size_human", "0 B"),
+            } if active_backup else None,
+        })
 
     @app.route("/api/v2/backups/<tenant_slug>/<workload>/<backup_name>", methods=["DELETE"])
     def delete_backup_v2(tenant_slug, workload, backup_name):
@@ -29,9 +67,43 @@ def register_v11_routes(app):
         status = 200 if result.get("status") == "deleted" else 404
         return jsonify(result), status
 
+    @app.route("/api/v2/backups/<tenant_slug>/<workload>/<backup_name>")
+    def get_backup_v2(tenant_slug, workload, backup_name):
+        backup = registry.get_backup(tenant_slug, workload, backup_name)
+        if not backup:
+            return jsonify({"error": "Not found"}), 404
+        return jsonify({"backup": backup})
+
+    @app.route("/api/v2/backups/<tenant_slug>/<workload>/<backup_name>/contents")
+    def browse_backup_v2(tenant_slug, workload, backup_name):
+        try:
+            payload = registry.browse_backup(
+                tenant_slug,
+                workload,
+                backup_name,
+                relative_path=request.args.get("path", ""),
+            )
+            return jsonify(payload)
+        except FileNotFoundError as e:
+            return jsonify({"error": str(e)}), 404
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+
     @app.route("/api/v2/backups/stats")
     def backup_stats_v2():
-        return jsonify(registry.get_stats())
+        stats = registry.get_stats()
+        backups, active_backup = _apply_active_backup_overlay(registry.list_all(use_cache=False))
+        if active_backup:
+            stats["total_backups"] = len(backups)
+            stats["total_size_bytes"] = sum(item["size_bytes"] for item in backups)
+            stats["total_size_human"] = registry._format_size(stats["total_size_bytes"])
+            stats["active_backup"] = {
+                "task_id": active_backup.get("task_id"),
+                "backup_path": (active_backup.get("meta") or {}).get("backup_path"),
+                "live_size_bytes": active_backup.get("live_size_bytes", 0),
+                "live_size_human": active_backup.get("live_size_human", "0 B"),
+            }
+        return jsonify(stats)
 
     @app.route("/api/v2/tenants/<tenant_slug>/history")
     def tenant_history_v2(tenant_slug):
@@ -44,6 +116,12 @@ def register_v11_routes(app):
         from app.tasks import run_backup_task
 
         data = request.get_json(force=True, silent=True) or {}
+        try:
+            from app.main import get_active_backup_guard
+
+            active_backup = get_active_backup_guard()
+        except Exception:
+            active_backup = None
         tenant_id = (data.get("tenant_id") or "").strip() or None
         workloads = data.get("workloads") or []
         custom_root = (data.get("custom_root") or "").strip() or None
@@ -71,6 +149,28 @@ def register_v11_routes(app):
                 "supported_workloads": sorted(SUPPORTED_WORKLOADS),
                 "requested_workloads": workloads,
             }), 400
+
+        if active_backup:
+            queue_item = OperationQueue().enqueue(
+                "backup",
+                "tenant_backup",
+                {
+                    "custom_root": custom_root,
+                    "tenant_id": tenant.get("id"),
+                    "workloads": supported,
+                },
+                f"Tenant Backup · {tenant.get('name')}",
+                ", ".join(supported),
+            )
+            return jsonify({
+                "status": "queued",
+                "queue_item": queue_item,
+                "active_backup": active_backup,
+                "tenant_id": tenant.get("id"),
+                "tenant_name": tenant.get("name"),
+                "workloads": supported,
+                "message": "Another backup task is still running. This tenant backup has been queued.",
+            }), 202
 
         task = run_backup_task.delay(
             custom_root=custom_root,

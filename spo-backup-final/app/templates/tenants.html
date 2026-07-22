@@ -41,6 +41,7 @@
                     <button class="btn-modern btn-ghost-modern" style="flex:1;justify-content:center;padding:8px 10px;" onclick="testTenant('{{ tenant.id }}', this)">Test</button>
                     <button class="btn-modern btn-danger-modern" style="padding:8px 12px;" onclick="deleteTenant('{{ tenant.id }}', '{{ tenant.name }}')"><i class="bi bi-trash"></i></button>
                 </div>
+                <div id="tenantStatus-{{ tenant.id }}" style="margin-top:12px;"></div>
             </div>
         </div>
     </div>
@@ -217,6 +218,10 @@ async function testTenant(tid, btn) {
     const res = await apiCall(`/api/tenants/${tid}/test`, 'POST');
     btn.innerHTML = html;
     btn.disabled = false;
+    const slot = document.getElementById(`tenantStatus-${tid}`);
+    if (slot) {
+        slot.innerHTML = renderTenantTestResult(res, {compact: true});
+    }
     const summary = buildTenantTestSummary(res);
     showToast(summary, res.status === 'ok' ? 'success' : 'warning');
 }
@@ -226,9 +231,11 @@ async function deleteTenant(tid, name) {
     if (res.status === 'deleted') { showToast('Tenant deleted', 'success'); setTimeout(() => location.reload(), 500); }
 }
 
-function renderTenantTestResult(res) {
+function renderTenantTestResult(res, options = {}) {
+    const compact = !!options.compact;
     const statusColor = res.status === 'ok' ? 'var(--success)' : 'var(--warning)';
     const details = res.details || {};
+    const warnings = Array.isArray(res.warnings) ? res.warnings.filter(Boolean) : [];
     const rows = Object.entries(details).map(([key, value]) => {
         const ok = !!value?.ok;
         const code = value?.status ?? 'n/a';
@@ -238,9 +245,16 @@ function renderTenantTestResult(res) {
             <span class="badge-modern ${ok ? 'badge-success' : 'badge-warning'}">${ok ? 'OK' : 'Blocked'} ${escapeHtml(String(code))}</span>
         </div>`;
     }).join('');
-    return `<div style="margin-top:12px;padding:12px 14px;border-radius:12px;background:rgba(99,102,241,0.06);border:1px solid var(--border);">
+    const warningHtml = warnings.length
+        ? `<div style="margin-top:10px;padding:10px 12px;border-radius:10px;background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.22);">
+            <div style="font-weight:700;color:var(--warning);margin-bottom:6px;"><i class="bi bi-shield-exclamation"></i> Action Needed</div>
+            ${warnings.map(item => `<div style="font-size:12px;color:var(--text-muted);line-height:1.6;">• ${escapeHtml(item)}</div>`).join('')}
+        </div>`
+        : '';
+    return `<div style="margin-top:${compact ? '8px' : '12px'};padding:12px 14px;border-radius:12px;background:rgba(99,102,241,0.06);border:1px solid var(--border);">
         <div style="font-weight:700;color:${statusColor};">${escapeHtml(res.message || 'Test completed')}</div>
         ${rows ? `<div style="margin-top:10px;">${rows}</div>` : ''}
+        ${warningHtml}
     </div>`;
 }
 
@@ -249,8 +263,12 @@ function buildTenantTestSummary(res) {
     const failed = Object.entries(details)
         .filter(([, value]) => !value?.ok)
         .map(([key, value]) => `${key}:${value?.status ?? 'n/a'}`);
-    if (!failed.length) return res.message || 'Tenant connection OK';
-    return `${res.message || 'Tenant test completed'} (${failed.join(', ')})`;
+    const warnings = Array.isArray(res.warnings) ? res.warnings.length : 0;
+    if (!failed.length && !warnings) return res.message || 'Tenant connection OK';
+    const suffix = [];
+    if (failed.length) suffix.push(failed.join(', '));
+    if (warnings) suffix.push(`${warnings} warning(s)`);
+    return `${res.message || 'Tenant test completed'} (${suffix.join(' | ')})`;
 }
 
 function escapeHtml(value) {

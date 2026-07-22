@@ -8,6 +8,7 @@ import msal
 import requests
 
 from app.config_manager import load_config, save_config
+from app.http_utils import build_retry_session
 
 log = logging.getLogger("spo_backup")
 
@@ -54,6 +55,7 @@ class TenantManager:
             "client_secret": azure.get("client_secret", ""),
             "object_id": azure.get("object_id", ""),
             "workloads_enabled": list(DEFAULT_WORKLOADS_ENABLED),
+            "workload_target_selection": {},
             "created_at": datetime.now(timezone.utc).isoformat(),
             "last_tested": None,
             "last_status": "untested",
@@ -74,6 +76,7 @@ class TenantManager:
             tenant.setdefault("client_secret", "")
             tenant.setdefault("object_id", "")
             tenant.setdefault("workloads_enabled", list(DEFAULT_WORKLOADS_ENABLED))
+            tenant.setdefault("workload_target_selection", {})
             tenant.setdefault("created_at", datetime.now(timezone.utc).isoformat())
             tenant.setdefault("last_tested", None)
             tenant.setdefault("last_status", "untested")
@@ -151,6 +154,7 @@ class TenantManager:
             "client_secret": data["client_secret"].strip(),
             "object_id": data.get("object_id", "").strip(),
             "workloads_enabled": data.get("workloads_enabled", list(DEFAULT_WORKLOADS_ENABLED)),
+            "workload_target_selection": data.get("workload_target_selection", {}),
             "created_at": datetime.now(timezone.utc).isoformat(),
             "last_tested": None,
             "last_status": "untested",
@@ -167,7 +171,7 @@ class TenantManager:
                 continue
             for field in [
                 "name", "primary_domain", "sharepoint_host", "tenant_id",
-                "client_id", "object_id", "workloads_enabled",
+                "client_id", "object_id", "workloads_enabled", "workload_target_selection",
             ]:
                 if field in data:
                     cfg["tenants"][idx][field] = data[field]
@@ -203,14 +207,15 @@ class TenantManager:
                 return {"status": "error", "message": result.get("error_description", "Auth failed"), "details": result}
             token = result["access_token"]
             headers = {"Authorization": f"Bearer {token}"}
+            session = build_retry_session()
             tests = {}
-            org = requests.get("https://graph.microsoft.com/v1.0/organization", headers=headers, timeout=15)
+            org = session.get("https://graph.microsoft.com/v1.0/organization", headers=headers, timeout=(10, 20))
             tests["organization"] = {"status": org.status_code, "ok": org.status_code == 200}
             sp_host = tenant_data.get("sharepoint_host", "")
             if sp_host:
-                sp = requests.get(f"https://graph.microsoft.com/v1.0/sites/{sp_host}", headers=headers, timeout=15)
+                sp = session.get(f"https://graph.microsoft.com/v1.0/sites/{sp_host}", headers=headers, timeout=(10, 20))
                 tests["sharepoint"] = {"status": sp.status_code, "ok": sp.status_code == 200}
-            users = requests.get("https://graph.microsoft.com/v1.0/users?$top=1", headers=headers, timeout=15)
+            users = session.get("https://graph.microsoft.com/v1.0/users?$top=1", headers=headers, timeout=(10, 20))
             tests["users"] = {"status": users.status_code, "ok": users.status_code == 200}
             all_ok = all(t.get("ok", False) for t in tests.values())
             if tenant_id:
@@ -221,7 +226,17 @@ class TenantManager:
                         tenant["last_status"] = "connected" if all_ok else "disconnected"
                         self._save(cfg)
                         break
-            return {"status": "ok" if all_ok else "warning", "message": "All tests passed" if all_ok else "Some tests failed", "details": tests}
+            warning_bits = []
+            if tests.get("users", {}).get("status") == 403:
+                warning_bits.append("Graph user discovery is blocked. Verify admin consent for User.Read.All / Files.Read.All / Mail.Read scopes.")
+            if tests.get("sharepoint", {}).get("status") == 403:
+                warning_bits.append("SharePoint site discovery is blocked. Verify Sites.Read.All / Sites.FullControl.All consent.")
+            return {
+                "status": "ok" if all_ok else "warning",
+                "message": "All tests passed" if all_ok else "Some tests failed",
+                "details": tests,
+                "warnings": warning_bits,
+            }
         except Exception as e:
             log.error(f"Tenant test failed: {e}")
             return {"status": "error", "message": str(e)}

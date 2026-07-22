@@ -13,7 +13,10 @@
             <div class="col-md-10">
                 <h3 style="margin:0 0 6px;font-weight:700;letter-spacing:-0.02em;">Custom SharePoint Download</h3>
                 <p style="color:var(--text-muted);margin:0;font-size:14px;line-height:1.6;">
-                    Paste URL, pilih lokasi penyimpanan, dan kontrol download dengan <b style="color:var(--primary);">Pause / Resume / Cancel</b>.
+                    Paste a URL, choose the destination path, and control the download with <b style="color:var(--primary);">Pause / Resume / Cancel</b>.
+                </p>
+                <p style="color:var(--accent);margin:8px 0 0;font-size:12px;line-height:1.6;">
+                    If another custom download is still active, a new request will be queued automatically without interrupting the running task.
                 </p>
             </div>
         </div>
@@ -32,7 +35,7 @@
 
             <label><i class="bi bi-folder-fill" style="color:var(--warning);margin-right:4px;"></i> Destination Path <span style="color:var(--text-dim);font-weight:normal;font-size:11px;margin-left:6px;">(optional)</span></label>
             <div style="position:relative;margin-bottom:8px;">
-                <input type="text" id="destPath" placeholder="my-project-x atau /backup/sharepoint/my-project-x" style="padding-right:120px;font-family:'JetBrains Mono',monospace;font-size:13px;">
+                <input type="text" id="destPath" placeholder="my-project-x or /backup/sharepoint/my-project-x" style="padding-right:120px;font-family:'JetBrains Mono',monospace;font-size:13px;">
                 <button type="button" class="btn-modern btn-ghost-modern" onclick="openPathPicker()" style="position:absolute;right:6px;top:50%;transform:translateY(-50%);padding:6px 12px;font-size:12px;"><i class="bi bi-folder2-open"></i> Browse</button>
             </div>
             <div class="form-hint" style="margin-bottom:18px;">
@@ -222,6 +225,10 @@ async function startDownload() {
         document.getElementById('progressState').className = 'badge-modern badge-info';
         document.getElementById('progressPanel').scrollIntoView({ behavior: 'smooth' });
         pollDownloadStatus(res.task_id);
+    } else if (res.status === 'queued') {
+        const pos = res.queue_item && res.queue_item.position ? ` Queue position: ${res.queue_item.position}.` : '';
+        showToast((res.message || 'Download queued.') + pos, 'info');
+        resetDownloadBtn();
     } else {
         showToast(res.error || 'Failed', 'error');
         resetDownloadBtn();

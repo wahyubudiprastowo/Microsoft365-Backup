@@ -25,6 +25,9 @@ class OutlookWorkload(BaseWorkload):
             "end_time": None,
             "backup_path": None,
             "mailbox_count": 0,
+            "targets_available": 0,
+            "targets_in_scope": 0,
+            "selection_mode": "all",
             "targets_processed": 0,
             "targets_failed": 0,
             "files_downloaded": 0,
@@ -61,7 +64,11 @@ class OutlookWorkload(BaseWorkload):
             users = self.list_targets()
             if users and users[0].get("error"):
                 raise Exception(users[0]["error"])
-            self.stats["mailbox_count"] = len(users)
+            users, selection_info = self.apply_target_selection(users)
+            self.stats["selection_mode"] = selection_info["mode"]
+            self.stats["targets_available"] = selection_info["available_count"]
+            self.stats["targets_in_scope"] = selection_info["effective_count"]
+            self.stats["mailbox_count"] = selection_info["effective_count"]
             for idx, user in enumerate(users, start=1):
                 self._check_control()
                 target_name = user.get("email") or user.get("name") or user.get("id")
@@ -215,6 +222,9 @@ class OutlookWorkload(BaseWorkload):
             "tenant_name": self.tenant.get("name"),
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "mailbox_count": self.stats["mailbox_count"],
+            "targets_available": self.stats["targets_available"],
+            "targets_in_scope": self.stats["targets_in_scope"],
+            "selection_mode": self.stats["selection_mode"],
             "targets_processed": self.stats["targets_processed"],
             "targets_failed": self.stats["targets_failed"],
             "files_downloaded": self.stats["files_downloaded"],

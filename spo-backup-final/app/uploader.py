@@ -6,6 +6,7 @@ import os
 import logging
 import time
 from pathlib import Path
+from posixpath import dirname as posix_dirname
 from urllib.parse import urlparse
 
 log = logging.getLogger("spo_backup")
@@ -17,6 +18,48 @@ class BaseUploader:
 
     def __init__(self, config: dict):
         self.config = config
+
+    def _normalize_remote_path(self, value: str | None = None) -> str:
+        raw = str(self.config.get("remote_path", "/") if value is None else value).strip()
+        raw = raw.replace("\\", "/")
+        if not raw:
+            return "/"
+        leading = raw.startswith("/")
+        parts = [part for part in raw.split("/") if part and part != "."]
+        normalized = "/".join(parts)
+        if not normalized:
+            return "/"
+        return f"/{normalized}" if leading else normalized
+
+    def _join_remote_path(self, *parts: str) -> str:
+        leading = False
+        clean_parts = []
+        for part in parts:
+            if part is None:
+                continue
+            text = str(part).strip().replace("\\", "/")
+            if not text:
+                continue
+            if text.startswith("/"):
+                leading = True
+            clean_parts.extend(item for item in text.split("/") if item and item != ".")
+        if not clean_parts:
+            return "/" if leading else ""
+        joined = "/".join(clean_parts)
+        return f"/{joined}" if leading else joined
+
+    def _probe_name(self) -> str:
+        return f".m365backup_probe_{int(time.time())}"
+
+    def _result(self, status: str, message: str, **extra) -> dict:
+        payload = {
+            "status": status,
+            "message": message,
+            "protocol": self.protocol,
+            "remote_path": self._normalize_remote_path(),
+        }
+        payload.update(extra)
+        return payload
 
     def test_connection(self) -> dict:
         """Test if connection works. Returns {status, message}."""
@@ -70,33 +113,50 @@ class SMBUploader(BaseUploader):
     def test_connection(self):
         try:
             conn = self._connect()
+            share = self.config["share"]
+            remote_path = self._normalize_remote_path()
             shares = [s.name for s in conn.listShares() if not s.isSpecial]
+            if share not in shares:
+                raise Exception(f"Configured share '{share}' not found on server")
+            self._mkdir_p(conn, share, remote_path)
+            probe_dir = self._join_remote_path(remote_path, self._probe_name())
+            conn.createDirectory(share, probe_dir)
+            conn.deleteDirectory(share, probe_dir)
             conn.close()
-            return {"status": "ok", "message": f"Connected. Shares: {', '.join(shares[:5])}"}
+            return self._result(
+                "ok",
+                f"Connected. Share '{share}' is reachable and writable.",
+                checks={"connectivity": True, "path_ready": True, "write_access": True},
+                share=share,
+            )
         except Exception as e:
-            return {"status": "error", "message": str(e)}
+            return self._result("error", str(e), checks={"connectivity": False, "path_ready": False, "write_access": False})
+
+    def _mkdir_p(self, conn, share, remote_dir):
+        normalized = self._normalize_remote_path(remote_dir)
+        parts = [part for part in normalized.split("/") if part]
+        current = ""
+        for part in parts:
+            current = self._join_remote_path(current, part)
+            try:
+                conn.createDirectory(share, current)
+            except Exception:
+                pass
 
     def upload_directory(self, local_dir, remote_dir=None, progress_callback=None):
-        remote_dir = remote_dir or self.config.get("remote_path", "/")
+        remote_dir = self._normalize_remote_path(remote_dir)
         share = self.config["share"]
         stats = {"uploaded": 0, "failed": 0, "bytes": 0, "errors": []}
         conn = self._connect()
         try:
             local_path = Path(local_dir)
+            self._mkdir_p(conn, share, remote_dir)
             for fp in local_path.rglob("*"):
                 if fp.is_file():
                     rel = fp.relative_to(local_path)
-                    remote_path = os.path.join(remote_dir, str(rel)).replace("\\", "/")
+                    remote_path = self._join_remote_path(remote_dir, str(rel))
                     try:
-                        # Create intermediate directories
-                        parts = remote_path.split("/")
-                        for i in range(1, len(parts)):
-                            d = "/".join(parts[:i])
-                            if d:
-                                try:
-                                    conn.createDirectory(share, d)
-                                except Exception:
-                                    pass
+                        self._mkdir_p(conn, share, posix_dirname(remote_path))
                         with open(fp, "rb") as f:
                             conn.storeFile(share, remote_path, f)
                         stats["uploaded"] += 1
@@ -108,6 +168,7 @@ class SMBUploader(BaseUploader):
                         stats["errors"].append(f"{rel}: {e}")
         finally:
             conn.close()
+        stats["remote_path"] = remote_dir
         return stats
 
 
@@ -145,32 +206,46 @@ class FTPUploader(BaseUploader):
     def test_connection(self):
         try:
             ftp = self._connect()
+            remote_path = self._normalize_remote_path()
+            self._mkdir_p(ftp, remote_path)
+            probe_dir = self._join_remote_path(remote_path, self._probe_name())
+            ftp.mkd(probe_dir)
+            ftp.rmd(probe_dir)
             cwd = ftp.pwd()
             ftp.quit()
-            return {"status": "ok", "message": f"Connected. Current dir: {cwd}"}
+            return self._result(
+                "ok",
+                f"Connected. FTP path '{remote_path}' is reachable and writable.",
+                checks={"connectivity": True, "path_ready": True, "write_access": True},
+                current_dir=cwd,
+            )
         except Exception as e:
-            return {"status": "error", "message": str(e)}
+            return self._result("error", str(e), checks={"connectivity": False, "path_ready": False, "write_access": False})
+
+    def _mkdir_p(self, ftp, remote_dir):
+        normalized = self._normalize_remote_path(remote_dir)
+        parts = [part for part in normalized.split("/") if part]
+        current = ""
+        for part in parts:
+            current = self._join_remote_path(current, part)
+            try:
+                ftp.mkd(current)
+            except Exception:
+                pass
 
     def upload_directory(self, local_dir, remote_dir=None, progress_callback=None):
-        remote_dir = remote_dir or self.config.get("remote_path", "/")
+        remote_dir = self._normalize_remote_path(remote_dir)
         stats = {"uploaded": 0, "failed": 0, "bytes": 0, "errors": []}
         ftp = self._connect()
         try:
             local_path = Path(local_dir)
+            self._mkdir_p(ftp, remote_dir)
             for fp in local_path.rglob("*"):
                 if fp.is_file():
                     rel = fp.relative_to(local_path)
-                    remote_file = os.path.join(remote_dir, str(rel)).replace("\\", "/")
+                    remote_file = self._join_remote_path(remote_dir, str(rel))
                     try:
-                        # Create remote directories
-                        parts = remote_file.split("/")
-                        for i in range(1, len(parts)):
-                            d = "/".join(parts[:i])
-                            if d:
-                                try:
-                                    ftp.mkd(d)
-                                except Exception:
-                                    pass
+                        self._mkdir_p(ftp, posix_dirname(remote_file))
                         with open(fp, "rb") as f:
                             ftp.storbinary(f"STOR {remote_file}", f)
                         stats["uploaded"] += 1
@@ -182,6 +257,7 @@ class FTPUploader(BaseUploader):
                         stats["errors"].append(f"{rel}: {e}")
         finally:
             ftp.quit()
+        stats["remote_path"] = remote_dir
         return stats
 
 
@@ -230,11 +306,21 @@ class SFTPUploader(BaseUploader):
         try:
             client, sftp = self._connect()
             home = sftp.normalize(".")
+            remote_path = self._normalize_remote_path()
+            self._sftp_mkdir_p(sftp, remote_path)
+            probe_dir = self._join_remote_path(remote_path, self._probe_name())
+            sftp.mkdir(probe_dir)
+            sftp.rmdir(probe_dir)
             sftp.close()
             client.close()
-            return {"status": "ok", "message": f"Connected. Home: {home}"}
+            return self._result(
+                "ok",
+                f"Connected. SFTP path '{remote_path}' is reachable and writable.",
+                checks={"connectivity": True, "path_ready": True, "write_access": True},
+                home=home,
+            )
         except Exception as e:
-            return {"status": "error", "message": str(e)}
+            return self._result("error", str(e), checks={"connectivity": False, "path_ready": False, "write_access": False})
 
     def _sftp_mkdir_p(self, sftp, remote_dir):
         """Recursive mkdir on SFTP."""
@@ -252,17 +338,18 @@ class SFTPUploader(BaseUploader):
                 pass
 
     def upload_directory(self, local_dir, remote_dir=None, progress_callback=None):
-        remote_dir = remote_dir or self.config.get("remote_path", "/tmp/backup")
+        remote_dir = self._normalize_remote_path(remote_dir or self.config.get("remote_path", "/tmp/backup"))
         stats = {"uploaded": 0, "failed": 0, "bytes": 0, "errors": []}
         client, sftp = self._connect()
         try:
             local_path = Path(local_dir)
+            self._sftp_mkdir_p(sftp, remote_dir)
             for fp in local_path.rglob("*"):
                 if fp.is_file():
                     rel = fp.relative_to(local_path)
-                    remote_file = os.path.join(remote_dir, str(rel)).replace("\\", "/")
+                    remote_file = self._join_remote_path(remote_dir, str(rel))
                     try:
-                        self._sftp_mkdir_p(sftp, os.path.dirname(remote_file))
+                        self._sftp_mkdir_p(sftp, posix_dirname(remote_file))
                         sftp.put(str(fp), remote_file)
                         stats["uploaded"] += 1
                         stats["bytes"] += fp.stat().st_size
@@ -274,6 +361,7 @@ class SFTPUploader(BaseUploader):
         finally:
             sftp.close()
             client.close()
+        stats["remote_path"] = remote_dir
         return stats
 
 
@@ -301,37 +389,66 @@ class WebDAVUploader(BaseUploader):
 
     def test_connection(self):
         try:
+            remote_path = self._normalize_remote_path()
+            target_url = self._build_url(remote_path)
             r = self.requests.request("PROPFIND", self.base_url, auth=self.auth, timeout=10)
             if r.status_code in (200, 207, 301, 302):
-                return {"status": "ok", "message": "WebDAV reachable"}
-            return {"status": "error", "message": f"HTTP {r.status_code}"}
+                self._mkcol_p(remote_path)
+                probe_dir = self._join_remote_path(remote_path, self._probe_name())
+                probe_url = self._build_url(probe_dir)
+                self.requests.request("MKCOL", probe_url, auth=self.auth, timeout=10).raise_for_status()
+                cleanup = self.requests.request("DELETE", probe_url, auth=self.auth, timeout=10)
+                if cleanup.status_code not in (200, 202, 204):
+                    raise Exception(f"Probe cleanup failed: HTTP {cleanup.status_code}")
+                path_check = self.requests.request("PROPFIND", target_url, auth=self.auth, timeout=10)
+                if path_check.status_code not in (200, 207, 301, 302):
+                    raise Exception(f"Remote path check failed: HTTP {path_check.status_code}")
+                return self._result(
+                    "ok",
+                    f"WebDAV path '{remote_path}' is reachable and writable.",
+                    checks={"connectivity": True, "path_ready": True, "write_access": True},
+                )
+            return self._result("error", f"HTTP {r.status_code}", checks={"connectivity": False, "path_ready": False, "write_access": False})
         except Exception as e:
-            return {"status": "error", "message": str(e)}
+            return self._result("error", str(e), checks={"connectivity": False, "path_ready": False, "write_access": False})
+
+    def _build_url(self, path):
+        normalized = self._normalize_remote_path(path).strip("/")
+        return self.base_url + normalized if normalized else self.base_url
 
     def _mkcol(self, path):
-        """Create remote collection (directory)."""
-        url = self.base_url + path.strip("/")
-        try:
-            self.requests.request("MKCOL", url, auth=self.auth, timeout=10)
-        except Exception:
-            pass
+        url = self._build_url(path)
+        response = self.requests.request("MKCOL", url, auth=self.auth, timeout=10)
+        if response.status_code not in (200, 201, 204, 301, 302, 405):
+            raise Exception(f"MKCOL failed for '{path}': HTTP {response.status_code}")
+
+    def _mkcol_p(self, path):
+        normalized = self._normalize_remote_path(path)
+        current = ""
+        for part in [piece for piece in normalized.split("/") if piece]:
+            current = self._join_remote_path(current, part)
+            try:
+                self._mkcol(current)
+            except Exception:
+                pass
 
     def upload_directory(self, local_dir, remote_dir=None, progress_callback=None):
-        remote_dir = remote_dir or self.config.get("remote_path", "")
+        remote_dir = self._normalize_remote_path(remote_dir or self.config.get("remote_path", ""))
         stats = {"uploaded": 0, "failed": 0, "bytes": 0, "errors": []}
         local_path = Path(local_dir)
         created_dirs = set()
+        self._mkcol_p(remote_dir)
 
         for fp in local_path.rglob("*"):
             if fp.is_file():
                 rel = fp.relative_to(local_path)
-                remote_file = os.path.join(remote_dir, str(rel)).replace("\\", "/").strip("/")
+                remote_file = self._join_remote_path(remote_dir, str(rel)).strip("/")
                 # Create intermediate directories
                 parts = remote_file.split("/")
                 for i in range(1, len(parts)):
                     d = "/".join(parts[:i])
                     if d and d not in created_dirs:
-                        self._mkcol(d)
+                        self._mkcol_p(d)
                         created_dirs.add(d)
                 try:
                     url = self.base_url + remote_file
@@ -345,6 +462,7 @@ class WebDAVUploader(BaseUploader):
                 except Exception as e:
                     stats["failed"] += 1
                     stats["errors"].append(f"{rel}: {e}")
+        stats["remote_path"] = remote_dir
         return stats
 
 
@@ -374,13 +492,27 @@ def test_remote_destination(dest: dict) -> dict:
         return {"status": "error", "message": "Protocol required"}
     try:
         uploader = get_uploader(protocol, dest.get("config", {}))
-        return uploader.test_connection()
+        result = uploader.test_connection()
+        result.setdefault("destination_name", dest.get("name", "Unnamed"))
+        result.setdefault("protocol", protocol)
+        return result
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        return {
+            "status": "error",
+            "message": str(e),
+            "destination_name": dest.get("name", "Unnamed"),
+            "protocol": protocol,
+            "remote_path": str((dest.get("config") or {}).get("remote_path") or "/"),
+            "checks": {"connectivity": False, "path_ready": False, "write_access": False},
+        }
 
 
-def upload_to_remote(dest: dict, local_dir: str, progress_callback=None) -> dict:
+def upload_to_remote(dest: dict, local_dir: str, progress_callback=None, remote_subpath: str | None = None) -> dict:
     """Upload local_dir to a configured remote destination."""
     protocol = dest.get("protocol", "").lower()
     uploader = get_uploader(protocol, dest.get("config", {}))
-    return uploader.upload_directory(local_dir, progress_callback=progress_callback)
+    base_remote = uploader._normalize_remote_path()
+    effective_remote = uploader._join_remote_path(base_remote, remote_subpath or "")
+    result = uploader.upload_directory(local_dir, remote_dir=effective_remote, progress_callback=progress_callback)
+    result.setdefault("remote_path", effective_remote)
+    return result

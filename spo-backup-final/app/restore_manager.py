@@ -1,10 +1,11 @@
 """Job-based restore manager compatible with existing backup layout."""
 import json
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-import requests
+from app.http_utils import build_retry_session, compute_backoff_delay, is_retryable_exception, is_retryable_status
 
 
 class RestoreJob:
@@ -92,9 +93,43 @@ class RestoreEngine:
         from app.workloads.base import BaseWorkload
         self.tenant = tenant_config
         self._auth = BaseWorkload(tenant_config)
+        self.session = build_retry_session()
 
     def _headers(self):
         return {"Authorization": f"Bearer {self._auth.get_token()}", "Content-Type": "application/octet-stream"}
+
+    def _request(self, method, url, expected_statuses=None, **kwargs):
+        response = None
+        last_error = None
+        expected_statuses = set(expected_statuses or [])
+        for attempt in range(5):
+            try:
+                response = self.session.request(method, url, **kwargs)
+                if response.status_code in expected_statuses:
+                    return response
+                if response.status_code == 401 and attempt < 4:
+                    self._auth._token = None
+                    self._auth._token_expiry = 0
+                    continue
+                if is_retryable_status(response.status_code) and attempt < 4:
+                    response.close()
+                    time.sleep(compute_backoff_delay(attempt, response=response))
+                    continue
+                response.raise_for_status()
+                return response
+            except Exception as e:
+                last_error = e
+                if response is not None:
+                    try:
+                        response.close()
+                    except Exception:
+                        pass
+                if not is_retryable_exception(e) or attempt == 4:
+                    raise
+                time.sleep(compute_backoff_delay(attempt))
+        if last_error:
+            raise last_error
+        raise RuntimeError(f"Restore request failed: {method} {url}")
 
     def restore_sharepoint(self, job, backup_path, progress_callback=None):
         stats = {"uploaded": 0, "skipped": 0, "errors": [], "bytes": 0}
@@ -103,9 +138,9 @@ class RestoreEngine:
         site_path = job.get("target_location") if mode == RestoreJob.MODE_NEW_LOCATION and job.get("target_location") else job.get("target_site")
         try:
             site_url = f"{self.GRAPH}/sites/{host}:/{site_path}" if site_path else f"{self.GRAPH}/sites/{host}"
-            site_data = requests.get(site_url, headers=self._headers(), timeout=30).json()
+            site_data = self._request("GET", site_url, headers=self._headers(), timeout=(15, 30)).json()
             site_id = site_data["id"]
-            drives_data = requests.get(f"{self.GRAPH}/sites/{site_id}/drives", headers=self._headers(), timeout=30).json()
+            drives_data = self._request("GET", f"{self.GRAPH}/sites/{site_id}/drives", headers=self._headers(), timeout=(15, 30)).json()
             drives_map = {drive["name"]: drive["id"] for drive in drives_data.get("value", [])}
 
             backup_root = Path(backup_path)
@@ -123,22 +158,24 @@ class RestoreEngine:
                         continue
                     rel = "/".join(parts[1:])
                     if mode == RestoreJob.MODE_MERGE:
-                        check = requests.get(
+                        check = self._request(
+                            "GET",
                             f"{self.GRAPH}/drives/{drive_id}/root:/{rel}",
+                            expected_statuses={404},
                             headers={"Authorization": self._headers()["Authorization"]},
-                            timeout=15,
+                            timeout=(10, 15),
                         )
                         if check.status_code == 200:
                             stats["skipped"] += 1
                             continue
                     with open(file_path, "rb") as handle:
-                        response = requests.put(
+                        response = self._request(
+                            "PUT",
                             f"{self.GRAPH}/drives/{drive_id}/root:/{rel}:/content",
                             headers=self._headers(),
                             data=handle,
-                            timeout=120,
+                            timeout=(20, 120),
                         )
-                        response.raise_for_status()
                     stats["uploaded"] += 1
                     stats["bytes"] += file_path.stat().st_size
                     if progress_callback:

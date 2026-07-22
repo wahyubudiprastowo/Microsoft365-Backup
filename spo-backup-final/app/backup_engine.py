@@ -18,6 +18,12 @@ from urllib.parse import urlparse, unquote
 from typing import Optional, Dict, List, Callable
 
 from app.task_control import check_control, PauseException, TaskController
+from app.http_utils import (
+    build_retry_session,
+    compute_backoff_delay,
+    is_retryable_exception,
+    is_retryable_status,
+)
 
 log = logging.getLogger("spo_backup")
 
@@ -64,6 +70,12 @@ class ProgressTracker:
 
     def file_done(self):
         self.files_done += 1
+
+    def sync_current_file_progress(self, target_done):
+        target_done = max(0, int(target_done or 0))
+        delta = target_done - self.current_file_done
+        self.current_file_done = target_done
+        self.bytes_done = max(0, self.bytes_done + delta)
 
     @property
     def overall_pct(self):
@@ -158,7 +170,7 @@ class BackupEngine:
         az = config["azure_ad"]
         self.auth = GraphAuth(az["tenant_id"], az["client_id"], az["client_secret"])
         self.manifest = ManifestManager(config["backup"]["manifest_dir"])
-        self.session = requests.Session()
+        self.session = build_retry_session()
         self.progress = ProgressTracker()
         self.stats = {
             "total_sites": 0, "successful_sites": 0, "failed_sites": [],
@@ -174,17 +186,30 @@ class BackupEngine:
                 "Content-Type": "application/json"}
 
     def _get(self, url, params=None):
-        for attempt in range(3):
+        response = None
+        last_error = None
+        for attempt in range(5):
             try:
-                r = self.session.get(url, headers=self._headers(), params=params, timeout=60)
-                if r.status_code == 429:
-                    time.sleep(int(r.headers.get("Retry-After", 30)))
+                response = self.session.get(url, headers=self._headers(), params=params, timeout=(20, 60))
+                if response.status_code == 401 and attempt < 4:
+                    time.sleep(1)
                     continue
-                r.raise_for_status()
-                return r.json()
-            except Exception:
-                if attempt == 2:
+                if is_retryable_status(response.status_code) and attempt < 4:
+                    delay = compute_backoff_delay(attempt, response=response)
+                    log.warning(f"Transient Graph GET {response.status_code} for {url} — retrying in {delay:.1f}s")
+                    time.sleep(delay)
+                    continue
+                response.raise_for_status()
+                return response.json()
+            except Exception as e:
+                last_error = e
+                if not is_retryable_exception(e) or attempt == 4:
                     raise
+                delay = compute_backoff_delay(attempt, response=response)
+                log.warning(f"Transient Graph GET failure for {url}: {e} — retrying in {delay:.1f}s")
+                time.sleep(delay)
+        if last_error:
+            raise last_error
         return {}
 
     def _check_control(self):
@@ -221,58 +246,96 @@ class BackupEngine:
 
         os.makedirs(os.path.dirname(dest), exist_ok=True)
         tmp = dest + ".tmp"
-        resume_from = 0
-        headers = self._headers()
-        if os.path.exists(tmp):
-            try:
-                resume_from = os.path.getsize(tmp)
-            except OSError:
-                resume_from = 0
-            if size_hint and resume_from >= size_hint:
-                os.replace(tmp, dest)
-                self.progress.bytes_done += size_hint
-                self.progress.files_done += 1
-                return {"bytes_written": size_hint, "skipped": True, "resumed": False}
-            if resume_from > 0:
-                headers["Range"] = f"bytes={resume_from}-"
+        self.progress.file_start(os.path.basename(dest), size_hint or 0)
 
-        r = self.session.get(url, headers=headers, stream=True, timeout=300)
-        r.raise_for_status()
-
-        total_size = int(r.headers.get("content-length", size_hint or 0))
-        if resume_from and r.status_code == 206 and size_hint:
-            total_size = size_hint
-        elif resume_from and r.status_code == 200:
-            # Range not honored by upstream; restart this file cleanly.
+        last_error = None
+        for attempt in range(5):
+            response = None
             resume_from = 0
             try:
-                os.remove(tmp)
-            except OSError:
-                pass
+                self._check_control()
+                headers = self._headers()
+                if os.path.exists(tmp):
+                    try:
+                        resume_from = os.path.getsize(tmp)
+                    except OSError:
+                        resume_from = 0
+                    if size_hint and resume_from >= size_hint:
+                        os.replace(tmp, dest)
+                        self.progress.sync_current_file_progress(size_hint)
+                        self.progress.file_done()
+                        return {"bytes_written": size_hint, "skipped": True, "resumed": False}
+                    if resume_from > 0:
+                        headers["Range"] = f"bytes={resume_from}-"
 
-        self.progress.file_start(os.path.basename(dest), total_size)
-        if resume_from:
-            self.progress.file_chunk(resume_from)
+                response = self.session.get(url, headers=headers, stream=True, timeout=(20, 300))
+                if is_retryable_status(response.status_code) and attempt < 4:
+                    delay = compute_backoff_delay(attempt, response=response)
+                    log.warning(
+                        f"Transient download status {response.status_code} for {os.path.basename(dest)} "
+                        f"(attempt {attempt + 1}/5) — retrying in {delay:.1f}s"
+                    )
+                    response.close()
+                    time.sleep(delay)
+                    continue
+                response.raise_for_status()
 
-        bytes_written = resume_from
-        # Download to .tmp file first, rename when done (atomic)
-        mode = "ab" if resume_from else "wb"
-        with open(tmp, mode) as f:
-            for chunk in r.iter_content(chunk_size=65536):
-                if chunk:
-                    # ★ Check pause/cancel every chunk
-                    self._check_control()
+                total_size = int(response.headers.get("content-length", size_hint or 0))
+                if resume_from and response.status_code == 206 and size_hint:
+                    total_size = size_hint
+                elif resume_from and response.status_code == 200:
+                    # Range not honored by upstream; restart cleanly using this full-body response.
+                    resume_from = 0
+                    try:
+                        os.remove(tmp)
+                    except OSError:
+                        pass
 
-                    f.write(chunk)
-                    sz = len(chunk)
-                    bytes_written += sz
-                    self.progress.file_chunk(sz)
-                    self._emit("file_progress")
+                self.progress.current_file_size = max(total_size, size_hint or 0, resume_from)
+                self.progress.sync_current_file_progress(resume_from)
 
-        # Atomic rename
-        os.replace(tmp, dest)
-        self.progress.file_done()
-        return {"bytes_written": bytes_written, "skipped": False, "resumed": resume_from > 0}
+                bytes_written = resume_from
+                mode = "ab" if resume_from else "wb"
+                with open(tmp, mode) as f:
+                    for chunk in response.iter_content(chunk_size=65536):
+                        if not chunk:
+                            continue
+                        self._check_control()
+                        f.write(chunk)
+                        sz = len(chunk)
+                        bytes_written += sz
+                        self.progress.file_chunk(sz)
+                        self._emit("file_progress")
+
+                os.replace(tmp, dest)
+                self.progress.file_done()
+                return {"bytes_written": bytes_written, "skipped": False, "resumed": resume_from > 0}
+            except Exception as e:
+                last_error = e
+                if response is not None:
+                    try:
+                        response.close()
+                    except Exception:
+                        pass
+                if isinstance(e, PauseException):
+                    raise
+                if not is_retryable_exception(e) or attempt == 4:
+                    raise
+                try:
+                    local_size = os.path.getsize(tmp) if os.path.exists(tmp) else 0
+                except OSError:
+                    local_size = 0
+                self.progress.sync_current_file_progress(local_size)
+                delay = compute_backoff_delay(attempt)
+                log.warning(
+                    f"Transient download failure for {os.path.basename(dest)}: {e} "
+                    f"(attempt {attempt + 1}/5, resume {local_size} bytes) — retrying in {delay:.1f}s"
+                )
+                time.sleep(delay)
+
+        if last_error:
+            raise last_error
+        raise RuntimeError(f"Download failed for {dest}")
 
     def _emit(self, event, extra=None):
         now = time.time()
@@ -756,7 +819,7 @@ class RestoreEngine:
         self.config = config
         az = config["azure_ad"]
         self.auth = GraphAuth(az["tenant_id"], az["client_id"], az["client_secret"])
-        self.session = requests.Session()
+        self.session = build_retry_session()
 
     def _headers(self):
         return {"Authorization": f"Bearer {self.auth.get_token()}",

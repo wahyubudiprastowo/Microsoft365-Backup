@@ -17,6 +17,7 @@ from app.main_routes_v11 import register_v11_routes
 from app.main_routes_v12 import register_v12_routes
 from app.main_routes_v13 import register_v13_routes
 from app.task_control import TaskController
+from app.operation_queue import OperationQueue
 
 from logging.handlers import RotatingFileHandler
 LOG_FILE = "/app/logs/spo_backup.log"
@@ -206,17 +207,37 @@ def _resolve_tracked_task(task_type: str):
         "backup": "spo:current_backup_task",
         "download": "spo:current_download_task",
     }
+    task_name_map = {
+        "backup": "app.tasks.run_backup_task",
+        "download": "app.tasks.download_custom_url_task",
+    }
     redis_key = key_map.get(task_type)
     if not redis_key:
         return None
+
+    def discover_fallback_task():
+        task_name = task_name_map.get(task_type)
+        if not task_name:
+            return None
+        discovered = _discover_worker_task(task_name)
+        if not discovered:
+            return None
+        discovered_task_id = discovered.get("id")
+        if not discovered_task_id:
+            return None
+        try:
+            _redis.setex(redis_key, 86400, discovered_task_id)
+        except redis_lib.RedisError as e:
+            log.warning(f"Failed to restore tracked {task_type} task in Redis: {e}")
+        return discovered_task_id
 
     try:
         task_id = _redis.get(redis_key)
     except redis_lib.RedisError as e:
         log.warning(f"Failed to read tracked {task_type} task from Redis: {e}")
-        return None
+        return discover_fallback_task()
     if not task_id:
-        return None
+        return discover_fallback_task()
 
     capp, _, _, _, _, _, _ = get_celery()
     result = AsyncResult(task_id, app=capp)
@@ -230,7 +251,7 @@ def _resolve_tracked_task(task_type: str):
         except redis_lib.RedisError:
             pass
         TaskController.cleanup(task_id)
-        return None
+        return discover_fallback_task()
 
     if state in {"SUCCESS", "FAILURE", "REVOKED", "BACKUP_FAILED"}:
         try:
@@ -238,28 +259,76 @@ def _resolve_tracked_task(task_type: str):
         except redis_lib.RedisError:
             pass
         TaskController.cleanup(task_id)
-        return None
+        return discover_fallback_task()
 
     if state == "PENDING" and not info:
+        worker_active = _is_worker_task_active(task_id)
+        if worker_active is not False:
+            return task_id
         try:
             _redis.delete(redis_key)
         except redis_lib.RedisError:
             pass
         TaskController.cleanup(task_id)
-        return None
+        return discover_fallback_task()
 
-    if state == "PROGRESS" and not _is_worker_task_active(task_id):
+    if state in {"PROGRESS", "STARTED"}:
+        worker_active = _is_worker_task_active(task_id)
+        if worker_active is not False:
+            return task_id
         try:
             _redis.delete(redis_key)
         except redis_lib.RedisError:
             pass
         TaskController.cleanup(task_id)
-        return None
+        return discover_fallback_task()
 
     return task_id
 
 
-def _is_worker_task_active(task_id: str) -> bool:
+def _list_worker_tasks(task_name: str):
+    try:
+        capp, _, _, _, _, _, _ = get_celery()
+        inspector = capp.control.inspect(timeout=1.5)
+        snapshots = [
+            ("active", inspector.active() or {}, 3),
+            ("reserved", inspector.reserved() or {}, 2),
+            ("scheduled", inspector.scheduled() or {}, 1),
+        ]
+        candidates = {}
+        for kind, payload, priority in snapshots:
+            for worker_tasks in payload.values():
+                for raw_item in worker_tasks or []:
+                    item = raw_item.get("request", raw_item) if isinstance(raw_item, dict) and "request" in raw_item else raw_item
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get("name") != task_name and item.get("type") != task_name:
+                        continue
+                    task_id = item.get("id")
+                    if not task_id:
+                        continue
+                    score = (priority, float(item.get("time_start") or 0))
+                    current = candidates.get(task_id)
+                    if not current or score > current["score"]:
+                        normalized = dict(item)
+                        normalized["_queue_kind"] = kind
+                        normalized["_queue_priority"] = priority
+                        candidates[task_id] = {"score": score, "item": normalized}
+        return [
+            entry["item"]
+            for entry in sorted(candidates.values(), key=lambda entry: entry["score"], reverse=True)
+        ]
+    except Exception as e:
+        log.warning(f"Failed to inspect worker task '{task_name}': {e}")
+        return []
+
+
+def _discover_worker_task(task_name: str):
+    tasks = _list_worker_tasks(task_name)
+    return tasks[0] if tasks else None
+
+
+def _is_worker_task_active(task_id: str):
     try:
         capp, _, _, _, _, _, _ = get_celery()
         inspector = capp.control.inspect(timeout=1.0)
@@ -270,7 +339,206 @@ def _is_worker_task_active(task_id: str) -> bool:
                     return True
     except Exception as e:
         log.warning(f"Failed to inspect active worker tasks: {e}")
+        return None
     return False
+
+
+def _calculate_backup_size(path: str) -> int:
+    total = 0
+    if not path or not os.path.isdir(path):
+        return total
+    for root, _, files in os.walk(path):
+        for filename in files:
+            if filename.endswith(".tmp"):
+                continue
+            try:
+                total += os.path.getsize(os.path.join(root, filename))
+            except OSError:
+                pass
+    return total
+
+
+def get_active_task_overlay(task_type: str, prefer_disk_size: bool = False):
+    task_id = _resolve_tracked_task(task_type)
+    if not task_id:
+        return None
+
+    capp, _, _, _, _, _, _ = get_celery()
+    result = AsyncResult(task_id, app=capp)
+    try:
+        state = result.state
+        info = result.info
+    except Exception as e:
+        log.warning(f"Failed to read active {task_type} task snapshot for {task_id[:8]}: {e}")
+        return {"task_id": task_id, "state": "UNKNOWN", "error": str(e)}
+
+    snapshot = {
+        "task_id": task_id,
+        "state": state,
+        "control_state": TaskController.get_state(task_id),
+    }
+    if isinstance(info, dict):
+        snapshot["meta"] = info
+
+    backup_path = None
+    live_size = 0
+    if task_type == "backup":
+        backup_path = (snapshot.get("meta") or {}).get("backup_path")
+    elif task_type == "download":
+        backup_path = (snapshot.get("meta") or {}).get("dest")
+
+    meta = snapshot.get("meta") or {}
+    live_size = int(meta.get("bytes_done") or meta.get("bytes_downloaded") or 0)
+    if backup_path:
+        if prefer_disk_size:
+            live_size = max(live_size, _calculate_backup_size(backup_path))
+    snapshot["live_size_bytes"] = live_size
+    snapshot["live_size_human"] = _human_size(live_size)
+    return snapshot
+
+
+def get_active_backup_guard():
+    worker_tasks = _list_worker_tasks("app.tasks.run_backup_task")
+    if not worker_tasks:
+        active_backup = get_active_task_overlay("backup")
+        if not active_backup:
+            return None
+        state = str(active_backup.get("state") or "").upper()
+        if state in {"SUCCESS", "FAILURE", "REVOKED", "BACKUP_FAILED", "UNKNOWN"}:
+            return None
+        return {
+            "task_id": active_backup.get("task_id"),
+            "state": state or "PROGRESS",
+            "control_state": active_backup.get("control_state", "running"),
+            "meta": active_backup.get("meta") or {},
+            "live_size_bytes": active_backup.get("live_size_bytes", 0),
+            "live_size_human": active_backup.get("live_size_human", "0 B"),
+            "queue_kind": "tracked",
+            "active_task_ids": [active_backup.get("task_id")],
+        }
+
+    capp, _, _, _, _, _, _ = get_celery()
+    active_items = []
+    for item in worker_tasks:
+        task_id = item.get("id")
+        if not task_id:
+            continue
+        control_state = TaskController.get_state(task_id)
+        queue_kind = item.get("_queue_kind") or "active"
+        if control_state == "cancelled" and queue_kind != "active":
+            continue
+        try:
+            result = AsyncResult(task_id, app=capp)
+            state = str(result.state or "").upper()
+            info = result.info if isinstance(result.info, dict) else {}
+        except Exception:
+            state = "UNKNOWN"
+            info = {}
+        if state in {"SUCCESS", "FAILURE", "REVOKED", "BACKUP_FAILED"} and queue_kind != "active":
+            continue
+        active_items.append({
+            "task_id": task_id,
+            "state": state or "PENDING",
+            "control_state": control_state,
+            "queue_kind": queue_kind,
+            "meta": info,
+        })
+
+    if not active_items:
+        return None
+
+    primary = active_items[0]
+    live_size = int(primary.get("meta", {}).get("bytes_done") or primary.get("meta", {}).get("bytes_downloaded") or 0)
+    return {
+        "task_id": primary.get("task_id"),
+        "state": primary.get("state"),
+        "control_state": primary.get("control_state"),
+        "queue_kind": primary.get("queue_kind"),
+        "meta": primary.get("meta") or {},
+        "live_size_bytes": live_size,
+        "live_size_human": _human_size(live_size),
+        "active_task_ids": [item["task_id"] for item in active_items],
+    }
+
+
+def get_active_download_guard():
+    active_download = get_active_task_overlay("download")
+    if not active_download:
+        return None
+    state = str(active_download.get("state") or "").upper()
+    if state in {"SUCCESS", "FAILURE", "REVOKED", "BACKUP_FAILED", "UNKNOWN"}:
+        return None
+    return {
+        "task_id": active_download.get("task_id"),
+        "state": state or "PROGRESS",
+        "control_state": active_download.get("control_state", "running"),
+        "meta": active_download.get("meta") or {},
+        "live_size_bytes": active_download.get("live_size_bytes", 0),
+        "live_size_human": active_download.get("live_size_human", "0 B"),
+    }
+
+
+def get_tasks_overview():
+    from app.restore_manager_v2 import RestoreManagerV2
+
+    queue = OperationQueue()
+    restore_mgr = RestoreManagerV2()
+    restore_mgr.recover_stale_queued_jobs(limit=100)
+    restore_jobs = restore_mgr.list_jobs(limit=100)
+    running_restore = next((job for job in restore_jobs if job.get("status") == "running"), None)
+    queued_restore_jobs = [job for job in restore_jobs if job.get("status") == "queued" and not job.get("task_id")]
+
+    return {
+        "running": {
+            "backup": get_active_backup_guard(),
+            "download": get_active_download_guard(),
+            "restore": running_restore,
+        },
+        "queued": {
+            "backup": queue.list("backup", limit=20),
+            "download": queue.list("download", limit=20),
+            "restore": [
+                {
+                    "id": job["id"],
+                    "group": "restore",
+                    "operation": "restore_v2",
+                    "title": f"Restore {job.get('workload', 'restore')}",
+                    "detail": f"{job.get('tenant_name') or 'Unknown tenant'} · {job.get('source_backup') or ''}",
+                    "status": "queued",
+                    "created_at": job.get("created_at"),
+                }
+                for job in queued_restore_jobs
+            ],
+        },
+    }
+
+
+def maybe_dispatch_queued_operations():
+    from app.operation_dispatcher import dispatch_next_queued_operation
+
+    dispatched = []
+    queue = OperationQueue()
+    if not get_active_backup_guard() and queue.length("backup"):
+        result = dispatch_next_queued_operation("backup")
+        if result and not result.get("error") and result.get("status") != "busy":
+            dispatched.append(result)
+    if not get_active_download_guard() and queue.length("download"):
+        result = dispatch_next_queued_operation("download")
+        if result and not result.get("error") and result.get("status") != "busy":
+            dispatched.append(result)
+    try:
+        from app.restore_manager_v2 import RestoreManagerV2
+
+        restore_mgr = RestoreManagerV2()
+        restore_mgr.recover_stale_queued_jobs(limit=100)
+        running_restore = next((item for item in restore_mgr.list_jobs(limit=100) if item.get("status") == "running"), None)
+        if not running_restore and queue.length("restore"):
+            result = dispatch_next_queued_operation("restore")
+            if result and not result.get("error") and result.get("status") != "busy":
+                dispatched.append(result)
+    except Exception:
+        pass
+    return dispatched
 
 def get_restore_engine():
     global _restore_engine_cache
@@ -341,14 +609,70 @@ def _human_size(b):
     return f"{b:.1f} PB"
 
 
+def build_dashboard_summary(config=None):
+    from app.backup_registry import BackupRegistry
+    from app.schedule_manager import ScheduleManager, DEFAULT_SCHEDULE
+    from app.tenant_manager import TenantManager
+
+    config = config or load_config()
+    sites = config.get("sites", []) or []
+    enabled_sites = [site for site in sites if site.get("enabled")]
+
+    tenant_mgr = TenantManager()
+    active_tenant = tenant_mgr.get_active_tenant(include_secret=False)
+
+    schedule_mgr = ScheduleManager()
+    if active_tenant:
+        active_schedule = schedule_mgr.get_schedule(active_tenant.get("id"))
+        schedule_scope = "Per-Tenant Schedule"
+        schedule_owner = active_tenant.get("name") or "Active tenant"
+        schedule_workloads = active_tenant.get("workloads_enabled", ["sharepoint"]) or ["sharepoint"]
+    else:
+        active_schedule = dict(DEFAULT_SCHEDULE)
+        active_schedule.update(config.get("schedule", {}) or {})
+        schedule_scope = "Legacy Global Schedule"
+        schedule_owner = "Global legacy flow"
+        schedule_workloads = ["sharepoint"]
+
+    registry = BackupRegistry(config)
+    backup_stats = registry.get_stats()
+
+    return {
+        "sites_total": len(sites),
+        "sites_enabled": len(enabled_sites),
+        "backups_total": int(backup_stats.get("total_backups", 0) or 0),
+        "active_tenant": active_tenant,
+        "schedule": {
+            "cron_expression": str(active_schedule.get("cron_expression") or DEFAULT_SCHEDULE["cron_expression"]),
+            "enabled": bool(active_schedule.get("enabled")),
+            "timezone": str(active_schedule.get("timezone") or DEFAULT_SCHEDULE["timezone"]),
+            "scope": schedule_scope,
+            "owner": schedule_owner,
+            "workloads": [str(item).strip().lower() for item in schedule_workloads if str(item).strip()],
+        },
+    }
+
+
 # ── PAGES ────────────────────────────────────────────────────────
 
 @app.route("/")
 def dashboard():
     config = load_config()
+    summary = build_dashboard_summary(config)
     # ★ Use fast list for dashboard — only top 10
     backups = fast_list_backups()[:10]
-    return render_template("dashboard.html", config=config, backups=backups, logs=_read_logs(30))
+    active_backup = get_active_task_overlay("backup")
+    if active_backup:
+        active_meta = active_backup.get("meta") or {}
+        active_path = active_meta.get("backup_path", "")
+        active_name = os.path.basename(active_path.rstrip("/")) if active_path else ""
+        live_size = int(active_backup.get("live_size_bytes") or 0)
+        for item in backups:
+            if item.get("name") == active_name and live_size > int(item.get("size_bytes") or 0):
+                item["size_bytes"] = live_size
+                item["size_human"] = _human_size(live_size)
+                break
+    return render_template("dashboard.html", config=config, backups=backups, logs=_read_logs(30), dashboard_summary=summary)
 
 
 @app.route("/sites")
@@ -396,12 +720,22 @@ def api_health():
     return jsonify({"status": "ok", "time": datetime.now(timezone.utc).isoformat()})
 
 
+@app.route("/api/dashboard/summary")
+def api_dashboard_summary():
+    return jsonify(build_dashboard_summary())
+
+
 @app.route("/api/task/active")
 def api_active_task():
     try:
+        maybe_dispatch_queued_operations()
+        backup_snapshot = get_active_task_overlay("backup")
+        download_snapshot = get_active_task_overlay("download")
         return jsonify({
-            "backup_task_id": _resolve_tracked_task("backup"),
-            "download_task_id": _resolve_tracked_task("download"),
+            "backup_task_id": backup_snapshot.get("task_id") if backup_snapshot else None,
+            "download_task_id": download_snapshot.get("task_id") if download_snapshot else None,
+            "backup": backup_snapshot,
+            "download": download_snapshot,
         })
     except redis_lib.RedisError as e:
         log.warning(f"/api/task/active degraded because Redis is unavailable: {e}")
@@ -411,6 +745,12 @@ def api_active_task():
             "degraded": True,
             "warning": "Task tracking is temporarily unavailable because Redis is unreachable.",
         })
+
+
+@app.route("/api/tasks/overview")
+def api_tasks_overview():
+    maybe_dispatch_queued_operations()
+    return jsonify(get_tasks_overview())
 
 
 # Config
@@ -605,6 +945,21 @@ def api_mkdir():
 @app.route("/api/backup/start", methods=["POST"])
 def api_start_backup():
     data = request.json or {}
+    active_backup = get_active_backup_guard()
+    if active_backup:
+        queue_item = OperationQueue().enqueue(
+            "backup",
+            "legacy_backup",
+            {"custom_root": data.get("custom_root")},
+            "Legacy SharePoint Backup",
+            f"Queued while task {active_backup['task_id'][:8]} is still running.",
+        )
+        return jsonify({
+            "status": "queued",
+            "queue_item": queue_item,
+            "active_backup": active_backup,
+            "message": "Another legacy SharePoint backup is still running. This request has been queued.",
+        }), 202
     _, run_backup, _, _, _, _, _ = get_celery()
     task = run_backup.delay(custom_root=data.get("custom_root"))
     log.info(f"Backup triggered: {task.id[:8]}")
@@ -631,6 +986,14 @@ def api_backup_status(tid):
     res = {"task_id": tid, "state": state}
     if state == "PENDING":
         control_state = TaskController.get_state(tid)
+        worker_active = _is_worker_task_active(tid)
+        if control_state in {"running", "paused", "cancelled"} and worker_active is not False:
+            res["state"] = "PROGRESS"
+            res["control_state"] = control_state
+            res["meta"] = info if isinstance(info, dict) else {}
+            if worker_active is None:
+                res["tracking_warning"] = "Worker activity could not be confirmed, but task state is still being preserved."
+            return jsonify(res)
         if control_state in {"running", "paused", "cancelled"}:
             res["state"] = "UNKNOWN"
             res["control_state"] = "stale"
@@ -642,8 +1005,9 @@ def api_backup_status(tid):
                 pass
             TaskController.cleanup(tid)
         return jsonify(res)
-    if state == "PROGRESS":
-        if not _is_worker_task_active(tid):
+    if state in {"PROGRESS", "STARTED"}:
+        worker_active = _is_worker_task_active(tid)
+        if worker_active is False:
             res["state"] = "UNKNOWN"
             res["control_state"] = "stale"
             res["error"] = "Tracked backup task is no longer running on the worker."
@@ -654,8 +1018,11 @@ def api_backup_status(tid):
                 pass
             TaskController.cleanup(tid)
             return jsonify(res)
-        res["meta"] = info
+        res["state"] = "PROGRESS"
+        res["meta"] = info if isinstance(info, dict) else {}
         res["control_state"] = TaskController.get_state(tid)
+        if worker_active is None:
+            res["tracking_warning"] = "Worker activity could not be confirmed, using task backend progress."
     elif state == "BACKUP_FAILED":
         res["meta"] = info
         res["control_state"] = "failed"
@@ -830,9 +1197,42 @@ def api_download_custom_url():
         return jsonify({"error": "URL required"}), 400
     if "sharepoint.com" not in url:
         return jsonify({"error": "Not a valid SharePoint URL"}), 400
+    active_download = get_active_download_guard()
+    if active_download:
+        queue_item = OperationQueue().enqueue(
+            "download",
+            "download_custom_url",
+            {"url": url, "dest_dir": dest_dir},
+            "Custom SharePoint Download",
+            dest_dir or url,
+        )
+        return jsonify({
+            "status": "queued",
+            "queue_item": queue_item,
+            "active_download": active_download,
+            "message": "Another custom download is still running. This download has been queued.",
+        }), 202
     _, _, _, _, download_task, _, _ = get_celery()
     task = download_task.delay(url, dest_dir=dest_dir)
     return jsonify({"status": "started", "task_id": task.id})
+
+
+@app.route("/api/queue/<item_id>", methods=["DELETE"])
+def api_delete_queue_item(item_id):
+    item = OperationQueue().get(item_id)
+    if not item:
+        return jsonify({"error": "Queue item not found"}), 404
+    if item.get("group") == "restore":
+        job_id = (item.get("payload") or {}).get("job_id")
+        if job_id:
+            try:
+                from app.restore_manager_v2 import RestoreManagerV2
+
+                RestoreManagerV2().update_job(job_id, {"status": "cancelled"})
+            except Exception:
+                pass
+    OperationQueue().remove(item_id, group=item.get("group"))
+    return jsonify({"status": "deleted", "item_id": item_id})
 
 
 @app.route("/api/download/parse", methods=["POST"])
@@ -865,6 +1265,14 @@ def api_download_status(tid):
     res = {"task_id": tid, "state": state}
     if state == "PENDING":
         control_state = TaskController.get_state(tid)
+        worker_active = _is_worker_task_active(tid)
+        if control_state in {"running", "paused", "cancelled"} and worker_active is not False:
+            res["state"] = "PROGRESS"
+            res["control_state"] = control_state
+            res["meta"] = info if isinstance(info, dict) else {}
+            if worker_active is None:
+                res["tracking_warning"] = "Worker activity could not be confirmed, but task state is still being preserved."
+            return jsonify(res)
         if control_state in {"running", "paused", "cancelled"}:
             res["state"] = "UNKNOWN"
             res["control_state"] = "stale"
@@ -876,8 +1284,9 @@ def api_download_status(tid):
                 pass
             TaskController.cleanup(tid)
         return jsonify(res)
-    if state == "PROGRESS":
-        if not _is_worker_task_active(tid):
+    if state in {"PROGRESS", "STARTED"}:
+        worker_active = _is_worker_task_active(tid)
+        if worker_active is False:
             res["state"] = "UNKNOWN"
             res["control_state"] = "stale"
             res["error"] = "Tracked download task is no longer running on the worker."
@@ -888,8 +1297,11 @@ def api_download_status(tid):
                 pass
             TaskController.cleanup(tid)
             return jsonify(res)
-        res["meta"] = info
+        res["state"] = "PROGRESS"
+        res["meta"] = info if isinstance(info, dict) else {}
         res["control_state"] = TaskController.get_state(tid)
+        if worker_active is None:
+            res["tracking_warning"] = "Worker activity could not be confirmed, using task backend progress."
     elif state == "SUCCESS":
         res["result"] = r.result
         if isinstance(r.result, dict):
@@ -943,13 +1355,57 @@ def api_task_control(tid):
 # Restore
 @app.route("/api/restore/site", methods=["POST"])
 def api_restore():
-    data = request.json
-    _, _, restore_task, _, _, _, _ = get_celery()
-    task = restore_task.delay(
-        data["backup_name"], data["site_name"],
-        data.get("target_site_path"), data.get("dry_run", False),
-    )
-    return jsonify({"status": "started", "task_id": task.id})
+    from app.main_routes import _build_legacy_restore_v2_payload, _legacy_restore_notice, tm
+    from app.operation_dispatcher import dispatch_next_queued_operation
+    from app.operation_queue import OperationQueue
+    from app.restore_manager_v2 import RestoreManagerV2
+
+    data = request.json or {}
+    active = tm.get_active_tenant(include_secret=False)
+    if not active:
+        return jsonify({"error": "No active tenant", **_legacy_restore_notice()}), 400
+    try:
+        payload = _build_legacy_restore_v2_payload(data, active)
+        mgr = RestoreManagerV2()
+        if data.get("dry_run"):
+            preview = mgr.dry_run(payload)
+            return jsonify({
+                "status": "preview",
+                "preview": preview,
+                **_legacy_restore_notice(),
+            })
+
+        job = mgr.create_job(payload)
+        queue_item = OperationQueue().enqueue(
+            "restore",
+            "restore_v2",
+            {"job_id": job["id"]},
+            "Restore sharepoint",
+            f"{active.get('name') or 'Unknown tenant'} · {payload['source_backup']}",
+        )
+        running_restore = next((item for item in mgr.list_jobs(limit=100) if item.get("status") == "running"), None)
+        dispatched = None if running_restore else dispatch_next_queued_operation("restore")
+        notice = _legacy_restore_notice()
+        if dispatched and dispatched.get("task_id"):
+            job = mgr.get_job(job["id"]) or job
+            return jsonify({
+                "status": "created",
+                "task_id": job.get("task_id"),
+                "job": job,
+                **notice,
+            }), 201
+        return jsonify({
+            "status": "queued",
+            "job": job,
+            "queue_item": queue_item,
+            "message": "Another restore job is already running. This restore job has been queued." if running_restore else None,
+            **notice,
+        }), 202
+    except ValueError as e:
+        return jsonify({"error": str(e), **_legacy_restore_notice()}), 400
+    except Exception as e:
+        log.error(f"Legacy restore compatibility request failed: {e}")
+        return jsonify({"error": str(e), **_legacy_restore_notice()}), 500
 
 
 # Notification

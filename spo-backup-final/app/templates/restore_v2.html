@@ -8,9 +8,12 @@
             <i class="bi bi-arrow-repeat"></i>
         </div>
         <div style="flex:1;min-width:260px;">
-            <div style="font-weight:700;font-size:15px;">Restore V2 Is The Main Restore Flow</div>
+            <div style="font-weight:700;font-size:15px;">Restore Is The Main Restore Flow</div>
             <div style="color:var(--text-muted);font-size:13px;margin-top:4px;">
-                Gunakan halaman ini untuk restore tenant-aware multi-workload. Route restore lama sudah diarahkan ke sini agar operator tidak lagi berpindah antara dua flow restore.
+                Use this page for tenant-aware multi-workload restore operations. The older restore route now points here so operators no longer have to switch between two restore flows.
+            </div>
+            <div style="color:var(--accent);font-size:12px;margin-top:8px;">
+                New restore jobs are also queued automatically when another restore is already running.
             </div>
         </div>
     </div>
@@ -62,8 +65,28 @@
 
                     <div id="spOptions" class="workload-options" style="display:none;">
                         <div class="mb-3">
-                            <label>Target Site Path</label>
-                            <input type="text" id="rTargetSite" placeholder="sites/BackupRestore" style="font-family:'JetBrains Mono',monospace;">
+                            <label>Target Site URL or Path</label>
+                            <input type="text" id="rTargetSite" placeholder="https://contoso.sharepoint.com/sites/BackupRestore" style="font-family:'JetBrains Mono',monospace;" onblur="loadSharePointLibraries()">
+                            <div class="form-hint" style="margin-top:6px;">This selects the destination SharePoint site.</div>
+                        </div>
+                        <div class="mb-3">
+                            <label>Target Library Name (optional)</label>
+                            <div style="display:flex;gap:8px;align-items:center;">
+                                <select id="rTargetLibrarySP" style="flex:1;">
+                                    <option value="">Automatic: match source library / fallback</option>
+                                </select>
+                                <button type="button" class="btn-modern btn-ghost-modern" onclick="loadSharePointLibraries()" style="padding:10px 12px;white-space:nowrap;">
+                                    <i class="bi bi-arrow-clockwise"></i> Load Libraries
+                                </button>
+                            </div>
+                            <div class="form-hint" id="spLibraryHint" style="margin-top:6px;">
+                                Leave this on automatic to reuse the source library when possible. If you choose a library explicitly, that library must already exist on the destination site.
+                            </div>
+                        </div>
+                        <div class="mb-3">
+                            <label>Target Folder in Destination Library (optional)</label>
+                            <input type="text" id="rTargetFolderSP" placeholder="Tes365Restore" style="font-family:'JetBrains Mono',monospace;">
+                            <div class="form-hint" style="margin-top:6px;">Example: <code>Tes365Restore</code> or <code>Archive/July-2026</code>. Missing folders are created automatically. Leave blank to restore into the selected library root.</div>
                         </div>
                     </div>
 
@@ -173,8 +196,9 @@ let selectedWorkload = null;
 let selectedMode = 'merge';
 let currentTenants = [];
 let currentBackups = [];
+let currentSharePointLibraries = [];
 const workloadHints = {
-    sharepoint: 'SharePoint restore needs a target site path or site ID. Use Preview first to validate the backup and target.',
+    sharepoint: 'SharePoint restore needs a target site URL/path and can optionally target a specific library and folder inside that destination site.',
     onedrive: 'OneDrive restore writes files back through Microsoft Graph. Ensure tenant app permissions and admin consent are complete.',
     outlook: 'Outlook restore currently supports messages, calendar, and contacts. Preview helps verify the backup contents before execution.',
     teams: 'Teams restore is export-only. It generates HTML/JSON/TXT output and does not re-import messages into Microsoft Teams.'
@@ -190,7 +214,86 @@ async function loadTenants() {
 
 function onTenantChange() {
     document.getElementById('rBackup').innerHTML = '<option value="">Select backup...</option>';
+    currentSharePointLibraries = [];
+    populateSharePointLibraries([], '');
     if (selectedWorkload) loadBackups();
+}
+
+function populateSharePointLibraries(libraries, selectedValue = '') {
+    currentSharePointLibraries = Array.isArray(libraries) ? libraries.slice() : [];
+    const sel = document.getElementById('rTargetLibrarySP');
+    if (!sel) return;
+    const preferred = selectedValue || sel.value || '';
+    sel.innerHTML = '<option value="">Automatic: match source library / fallback</option>' +
+        currentSharePointLibraries.map(name => `<option value="${escapeAttr(name)}">${escapeHtml(name)}</option>`).join('');
+    if (preferred && currentSharePointLibraries.includes(preferred)) {
+        sel.value = preferred;
+    } else if (!preferred) {
+        sel.value = '';
+    }
+}
+
+async function loadSharePointLibraries(silent = false) {
+    if (selectedWorkload !== 'sharepoint') return [];
+    const tenantId = document.getElementById('rTenant').value;
+    const targetSitePath = document.getElementById('rTargetSite').value.trim();
+    const currentSelection = document.getElementById('rTargetLibrarySP').value;
+    const hint = document.getElementById('spLibraryHint');
+    if (!tenantId || !targetSitePath) {
+        populateSharePointLibraries([], currentSelection);
+        if (hint) {
+            hint.textContent = 'Enter the destination SharePoint site first, then load libraries. Missing folders are created automatically, but the destination library must already exist.';
+        }
+        return [];
+    }
+    if (hint) {
+        hint.textContent = 'Loading destination libraries from the selected SharePoint site...';
+    }
+    const res = await apiCall('/api/v2/restore/sharepoint/libraries', 'POST', {
+        tenant_id: tenantId,
+        target_site_path: targetSitePath,
+    });
+    if (res.error) {
+        populateSharePointLibraries([], currentSelection);
+        if (hint) {
+            hint.textContent = `Unable to load libraries: ${res.error}`;
+        }
+        if (!silent) showToast(res.error, 'error');
+        return [];
+    }
+    populateSharePointLibraries(res.libraries || [], currentSelection);
+    if (hint) {
+        const defaultInfo = res.default_library ? ` Default fallback: ${res.default_library}.` : '';
+        hint.textContent = `${res.message || 'Target folder will be created automatically if it does not exist.'}${defaultInfo}`;
+    }
+    if (!silent) {
+        showToast(`Loaded ${currentSharePointLibraries.length} destination library(s)`, 'success');
+    }
+    return currentSharePointLibraries;
+}
+
+function resolveCompatibleRestoreBackups(tenant, workload, backups) {
+    const normalizedWorkload = String(workload || '').trim().toLowerCase();
+    const desiredSlug = String(tenant?.tenant_slug || '').trim();
+    const desiredId = String(tenant?.id || '').trim();
+    const workloadBackups = (backups || []).filter(item => String(item.workload || '').trim().toLowerCase() === normalizedWorkload);
+
+    const exact = workloadBackups.filter(item => String(item.tenant_slug || '').trim() === desiredSlug);
+    if (exact.length) {
+        return { backups: exact, source: 'tenant-exact' };
+    }
+
+    if (normalizedWorkload === 'sharepoint') {
+        const legacyFallback = workloadBackups.filter(item =>
+            String(item.layout || '').trim().toLowerCase() === 'legacy' ||
+            String(item.tenant_slug || '').trim() === 'legacy-default'
+        );
+        if (legacyFallback.length && desiredId === 'legacy-default') {
+            return { backups: legacyFallback, source: 'legacy-compatibility' };
+        }
+    }
+
+    return { backups: [], source: 'none' };
 }
 
 function selectWorkload(workload, btn) {
@@ -204,6 +307,9 @@ function selectWorkload(workload, btn) {
     if (workload === 'teams') document.getElementById('teamsOptions').style.display = 'block';
     document.getElementById('workloadReadiness').textContent = workloadHints[workload] || '';
     document.getElementById('previewResult').style.display = 'none';
+    if (workload === 'sharepoint' && document.getElementById('rTargetSite').value.trim()) {
+        loadSharePointLibraries(true);
+    }
     loadBackups();
 }
 
@@ -224,22 +330,44 @@ async function loadBackups() {
     if (!tenantId || !selectedWorkload) return;
     const tenant = currentTenants.find(t => t.id === tenantId);
     if (!tenant) return;
-    const slug = tenant.tenant_slug || '';
-    if (!slug) {
-        showToast('Tenant slug missing from API response', 'error');
-        return;
-    }
-    const res = await apiCall(`/api/v2/backups?refresh=1&tenant_slug=${encodeURIComponent(slug)}&workload=${encodeURIComponent(selectedWorkload)}`);
-    currentBackups = res.backups || [];
+    const res = await apiCall(`/api/v2/backups?refresh=1&workload=${encodeURIComponent(selectedWorkload)}`);
+    const compatibility = resolveCompatibleRestoreBackups(tenant, selectedWorkload, res.backups || []);
+    const available = compatibility.backups || [];
+    const restorable = available.filter(item => String(item.status || '').toLowerCase() !== 'running');
+    const runningOnly = available.filter(item => String(item.status || '').toLowerCase() === 'running');
+    currentBackups = restorable;
     const sel = document.getElementById('rBackup');
-    if (!currentBackups.length) {
+    if (!restorable.length) {
         sel.innerHTML = '<option value="">No backups found</option>';
-        document.getElementById('backupInfo').textContent = `No ${selectedWorkload} backups for this tenant`;
+        if (runningOnly.length) {
+            document.getElementById('backupInfo').textContent = `A ${selectedWorkload} backup is still running. Wait until it finishes before using it as a restore source.`;
+            return;
+        }
+        document.getElementById('backupInfo').textContent = `No compatible ${selectedWorkload} backups found for this tenant`;
         return;
     }
     sel.innerHTML = '<option value="">Select backup...</option>' +
-        currentBackups.map(b => `<option value="${escapeAttr(b.backup_path)}" data-name="${escapeAttr(b.backup_name)}">${escapeHtml(b.backup_name)} · ${escapeHtml(b.date)} · ${escapeHtml(b.size_human)}${(b.files_count || b.targets_count) ? '' : ' · empty/metadata only'}</option>`).join('');
-    document.getElementById('backupInfo').textContent = `${currentBackups.length} backup(s) found`;
+        restorable.map(b => {
+            const status = String(b.status || 'unknown').toLowerCase();
+            const statusLabel = status === 'success'
+                ? 'complete'
+                : status === 'interrupted'
+                    ? 'partial/interrupted'
+                    : status;
+            const summary = b.summary ? ` · ${b.summary}` : '';
+            const emptiness = (b.files_count || b.targets_count || b.size_bytes)
+                ? ''
+                : ' · empty/metadata only';
+            return `<option value="${escapeAttr(b.backup_path)}" data-name="${escapeAttr(b.backup_name)}">${escapeHtml(b.backup_name)} · ${escapeHtml(b.date)} · ${escapeHtml(b.size_human)} · ${escapeHtml(statusLabel)}${escapeHtml(summary)}${emptiness}</option>`;
+        }).join('');
+
+    const fallbackHint = compatibility.source === 'legacy-compatibility'
+        ? ' Using legacy SharePoint backup compatibility mapping for this tenant.'
+        : '';
+    const runningHint = runningOnly.length
+        ? ` ${runningOnly.length} running backup(s) excluded from restore source selection.`
+        : '';
+    document.getElementById('backupInfo').textContent = `${restorable.length} backup(s) available for restore.${fallbackHint}${runningHint}`;
 }
 
 function buildConfig() {
@@ -260,6 +388,8 @@ function buildConfig() {
     };
     if (selectedWorkload === 'sharepoint') {
         config.target_site_path = document.getElementById('rTargetSite').value.trim();
+        config.target_library_name = document.getElementById('rTargetLibrarySP').value.trim();
+        config.target_folder_path = document.getElementById('rTargetFolderSP').value.trim();
     } else if (selectedWorkload === 'onedrive') {
         config.target_folder = document.getElementById('rTargetFolder').value.trim() || 'M365 Restored';
         try {
@@ -291,6 +421,31 @@ function buildConfig() {
     return config;
 }
 
+function formatResolutionLabel(mode) {
+    const mapping = {
+        manual_library: 'manual library',
+        source_library_match: 'source library match',
+        documents_fallback: 'Documents fallback',
+        first_available_fallback: 'first available fallback',
+    };
+    return mapping[mode] || mode || 'unknown';
+}
+
+function renderSharePointDestinationPlan(plan) {
+    if (!Array.isArray(plan) || !plan.length) return '';
+    return `<div style="margin-top:10px;">
+        <div style="font-weight:700;margin-bottom:6px;">Resolved Destination Plan</div>
+        ${plan.map(item => `
+            <div style="padding:8px 10px;margin-bottom:6px;border-radius:8px;background:rgba(255,255,255,0.03);border:1px solid var(--border);">
+                <div><b>Source library:</b> ${escapeHtml(item.source_library || '—')}</div>
+                <div><b>Destination library:</b> ${escapeHtml(item.selected_library || '—')}</div>
+                <div><b>Final path:</b> ${escapeHtml(item.resolved_path || item.selected_library || '—')}</div>
+                <div><b>Resolution:</b> ${escapeHtml(formatResolutionLabel(item.resolution))}</div>
+            </div>
+        `).join('')}
+    </div>`;
+}
+
 async function previewRestore() {
     const config = buildConfig();
     if (!config) return;
@@ -307,31 +462,52 @@ async function previewRestore() {
     if (selectedWorkload === 'sharepoint' && !config.target_site_path && !config.target_site_id) {
         warnings.push('SharePoint restore requires a target site path or site ID.');
     }
+    if (selectedWorkload === 'sharepoint') {
+        const plan = Array.isArray(res.destination_plan) ? res.destination_plan : [];
+        const fallbackItems = plan.filter(item => ['documents_fallback', 'first_available_fallback'].includes(item.resolution));
+        if (fallbackItems.length) {
+            warnings.push('Destination library could not be matched from the source backup for one or more entries. Restore will fall back automatically unless you specify Target Library Name explicitly.');
+        }
+        if (!config.target_library_name) {
+            warnings.push('Target Library Name is blank, so SharePoint restore may auto-match the source library or fall back to Documents.');
+        }
+        if (res.target_folder_behavior === 'will_create_if_missing') {
+            warnings.push('The destination folder will be created automatically if it does not already exist.');
+        }
+    }
     if (permission.ready === false) {
         const scopes = Array.isArray(permission.required_scopes) && permission.required_scopes.length
             ? ` Required scopes: ${permission.required_scopes.join(', ')}.`
             : '';
         warnings.push(`${permission.message || 'Tenant permission readiness check failed.'}${scopes}`);
     }
-    const html = Object.entries(res).map(([k, v]) => {
+    const baseHtml = Object.entries(res).filter(([k]) => k !== 'destination_plan').map(([k, v]) => {
         const value = typeof v === 'number'
             ? v.toLocaleString()
             : (typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v));
         return `<div><b>${escapeHtml(k)}:</b> ${escapeHtml(value)}</div>`;
     }).join('');
+    const planHtml = selectedWorkload === 'sharepoint' ? renderSharePointDestinationPlan(res.destination_plan) : '';
     document.getElementById('previewWarning').innerHTML = warnings.join('<br>');
     document.getElementById('previewWarning').style.display = warnings.length ? 'block' : 'none';
-    document.getElementById('previewContent').innerHTML = html;
+    document.getElementById('previewContent').innerHTML = baseHtml + planHtml;
     document.getElementById('previewResult').style.display = 'block';
 }
 
 async function startRestore() {
     const config = buildConfig();
     if (!config) return;
-    if (!confirm(`Start restore?\n\nWorkload: ${config.workload}\nSource: ${config.source_backup}\nMode: ${config.mode}`)) return;
+    const destinationHint = selectedWorkload === 'sharepoint'
+        ? `\nTarget site: ${config.target_site_path || '-'}\nTarget library: ${config.target_library_name || '[auto-match]'}\nTarget folder: ${config.target_folder_path || '[library root]'}`
+        : '';
+    if (!confirm(`Start restore?\n\nWorkload: ${config.workload}\nSource: ${config.source_backup}\nMode: ${config.mode}${destinationHint}`)) return;
     const res = await apiCall('/api/v2/restore/jobs', 'POST', config);
     if (res.status === 'created') {
         showToast(`Restore job created: ${res.job.id.substring(0, 8)}`, 'success');
+        setTimeout(refreshJobs, 800);
+    } else if (res.status === 'queued') {
+        const pos = res.queue_item && res.queue_item.position ? ` Queue position: ${res.queue_item.position}.` : '';
+        showToast(`Restore job queued.${pos}`, 'info');
         setTimeout(refreshJobs, 800);
     } else {
         showToast(res.error || 'Failed', 'error');
@@ -357,6 +533,16 @@ async function refreshJobs() {
                     <div style="font-weight:700;font-size:14px;"><span class="wl-badge">${escapeHtml(j.workload)}</span>${escapeHtml(j.tenant_name || 'Unknown tenant')}</div>
                     <div style="font-size:11px;color:var(--text-muted);font-family:'JetBrains Mono',monospace;margin-top:2px;">${escapeHtml(j.source_backup || '')} · mode: ${escapeHtml(j.mode || '')}</div>
                     ${j.current_target ? `<div style="font-size:11px;color:var(--text-dim);margin-top:2px;">→ ${escapeHtml(j.current_target)}</div>` : ''}
+                    ${(j.target_site_path || j.target_library_name || j.target_folder_path) ? `
+                        <div style="font-size:11px;color:var(--text-dim);margin-top:4px;">
+                            target: ${escapeHtml(j.target_site_path || '—')}
+                            ${j.target_library_name ? ` · library: ${escapeHtml(j.target_library_name)}` : ' · library: [auto-match]'}
+                            ${j.target_folder_path ? ` · folder: ${escapeHtml(j.target_folder_path)}` : ''}
+                        </div>` : ''}
+                    ${j.result && j.result.resolved_destination_summary ? `
+                        <div style="font-size:11px;color:var(--accent);margin-top:2px;">
+                            resolved: ${escapeHtml(j.result.resolved_destination_summary)}
+                        </div>` : ''}
                 </div>
                 <span class="badge-modern" style="background:${c}1A;color:${c};">${escapeHtml((j.status || '').replace(/^./, s => s.toUpperCase()))}</span>
             </div>

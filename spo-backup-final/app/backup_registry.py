@@ -118,6 +118,7 @@ class BackupRegistry:
         files_count = 0
         targets_count = 0
         status = None
+        manifest = None
 
         manifest_candidates = [
             backup_dir / "_workload_manifest.json",
@@ -152,6 +153,9 @@ class BackupRegistry:
             else:
                 status = "unknown"
 
+        target_names = self._list_root_target_names(backup_dir)
+        summary = self._build_backup_summary(workload, manifest, target_names, targets_count)
+
         return {
             "tenant_slug": tenant_slug,
             "tenant_name": tenant_name,
@@ -165,7 +169,59 @@ class BackupRegistry:
             "files_count": files_count or 0,
             "targets_count": targets_count or 0,
             "status": status,
+            "target_names_preview": target_names[:3],
+            "target_names_more": max(0, len(target_names) - 3),
+            "summary": summary,
         }
+
+    def _list_root_target_names(self, backup_dir: Path) -> list[str]:
+        names = []
+        try:
+            for entry in sorted(backup_dir.iterdir(), key=lambda item: item.name.lower()):
+                if entry.name.startswith(".") or entry.name.startswith("_"):
+                    continue
+                if entry.is_dir():
+                    names.append(entry.name)
+        except Exception:
+            pass
+        return names
+
+    def _build_backup_summary(self, workload: str, manifest: dict | None, target_names: list[str], targets_count: int) -> str:
+        if workload == "sharepoint":
+            if target_names:
+                if len(target_names) == 1:
+                    return f"Site: {target_names[0]}"
+                return f"Sites: {', '.join(target_names[:3])}" + (f" +{len(target_names) - 3} more" if len(target_names) > 3 else "")
+            if targets_count:
+                return f"{targets_count} site target(s)"
+            return "SharePoint backup folder"
+
+        if workload == "onedrive":
+            if targets_count:
+                return f"Users in scope: {targets_count}"
+            if target_names:
+                return f"Users: {', '.join(target_names[:3])}" + (f" +{len(target_names) - 3} more" if len(target_names) > 3 else "")
+            return "OneDrive target backup"
+
+        if workload == "outlook":
+            if targets_count:
+                return f"Mailboxes in scope: {targets_count}"
+            if target_names:
+                return f"Mailboxes: {', '.join(target_names[:3])}" + (f" +{len(target_names) - 3} more" if len(target_names) > 3 else "")
+            return "Outlook mailbox backup"
+
+        if workload == "teams":
+            if targets_count:
+                return f"Teams in scope: {targets_count}"
+            if target_names:
+                return f"Teams: {', '.join(target_names[:3])}" + (f" +{len(target_names) - 3} more" if len(target_names) > 3 else "")
+            return "Teams export backup"
+
+        if target_names:
+            return ", ".join(target_names[:3]) + (f" +{len(target_names) - 3} more" if len(target_names) > 3 else "")
+        if targets_count:
+            return f"Targets: {targets_count}"
+        return "Backup folder"
 
     def _guess_tenant_name(self, tenant_slug: str) -> str:
         for tenant in self._tenant_manager.list_tenants(include_secrets=False):
@@ -226,20 +282,93 @@ class BackupRegistry:
         )
         return self.tenant_root / tenant_slug / workload
 
-    def delete(self, tenant_slug: str, workload: str, backup_name: str) -> dict:
+    def resolve_backup_path(self, tenant_slug: str, workload: str, backup_name: str) -> Path | None:
         if not (backup_name.startswith("backup_") or backup_name.startswith("custom_")):
-            return {"error": "Invalid backup name"}
-
+            return None
         candidates = [
             self.tenant_root / tenant_slug / workload / backup_name,
             self.legacy_root / backup_name,
         ]
         for path in candidates:
             if path.exists() and path.is_dir():
-                shutil.rmtree(path)
-                self.invalidate_cache()
-                log.info(f"Deleted backup: {path}")
-                return {"status": "deleted", "path": str(path), "layout": "legacy" if path.parent == self.legacy_root else "tenant-aware"}
+                return path.resolve()
+        return None
+
+    def get_backup(self, tenant_slug: str, workload: str, backup_name: str) -> dict | None:
+        for item in self.list_all(use_cache=False):
+            if (
+                item.get("tenant_slug") == tenant_slug
+                and item.get("workload") == workload
+                and item.get("backup_name") == backup_name
+            ):
+                return item
+        return None
+
+    def browse_backup(self, tenant_slug: str, workload: str, backup_name: str, relative_path: str = "") -> dict:
+        backup_path = self.resolve_backup_path(tenant_slug, workload, backup_name)
+        if not backup_path:
+            raise FileNotFoundError("Backup not found")
+
+        clean_relative = str(relative_path or "").strip().strip("/")
+        current_path = (backup_path / clean_relative).resolve() if clean_relative else backup_path
+        if current_path != backup_path and backup_path not in current_path.parents:
+            raise ValueError("Invalid backup path")
+        if not current_path.exists():
+            raise FileNotFoundError("Path not found inside backup")
+        if not current_path.is_dir():
+            raise ValueError("Requested path is not a directory")
+
+        entries = []
+        for entry in sorted(current_path.iterdir(), key=lambda item: (item.is_file(), item.name.lower())):
+            if entry.name.startswith("."):
+                continue
+            try:
+                stat = entry.stat()
+            except OSError:
+                continue
+            child_relative = str(entry.relative_to(backup_path)).replace("\\", "/")
+            item = {
+                "name": entry.name,
+                "relative_path": child_relative,
+                "type": "directory" if entry.is_dir() else "file",
+                "modified": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            if entry.is_dir():
+                try:
+                    item["children_count"] = sum(1 for child in entry.iterdir() if not child.name.startswith("."))
+                except OSError:
+                    item["children_count"] = None
+            else:
+                item["size_bytes"] = stat.st_size
+                item["size_human"] = self._format_size(stat.st_size)
+            entries.append(item)
+
+        backup = self.get_backup(tenant_slug, workload, backup_name) or {
+            "tenant_slug": tenant_slug,
+            "workload": workload,
+            "backup_name": backup_name,
+            "backup_path": str(backup_path),
+        }
+        parent_path = None
+        if clean_relative:
+            parent_bits = clean_relative.split("/")[:-1]
+            parent_path = "/".join(parent_bits)
+
+        return {
+            "backup": backup,
+            "backup_root": str(backup_path),
+            "current_path": clean_relative,
+            "parent_path": parent_path,
+            "entries": entries,
+        }
+
+    def delete(self, tenant_slug: str, workload: str, backup_name: str) -> dict:
+        path = self.resolve_backup_path(tenant_slug, workload, backup_name)
+        if path:
+            shutil.rmtree(path)
+            self.invalidate_cache()
+            log.info(f"Deleted backup: {path}")
+            return {"status": "deleted", "path": str(path), "layout": "legacy" if path.parent == self.legacy_root else "tenant-aware"}
         return {"error": "Not found"}
 
     def get_history(self, tenant_slug: str, limit: int = 20) -> list:

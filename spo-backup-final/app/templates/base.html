@@ -204,6 +204,24 @@
         .toast-container { position: fixed; top: 24px; right: 24px; z-index: 9999; }
         .modal { z-index: 2000; }
         .modal-backdrop { z-index: 1990; }
+        .modal-dialog { position: relative; z-index: 2101; }
+        .modal-content {
+            position: relative;
+            z-index: 2102;
+            pointer-events: auto;
+        }
+        .modal-header, .modal-body, .modal-footer {
+            position: relative;
+            z-index: 2103;
+        }
+        .modal input,
+        .modal select,
+        .modal textarea,
+        .modal button,
+        .modal a,
+        .modal label {
+            pointer-events: auto;
+        }
         .modal-dialog-scrollable .modal-content { max-height: calc(100vh - 2rem); }
         .modal-dialog-scrollable .modal-body { overflow-y: auto; }
         .toast-modern {
@@ -272,7 +290,7 @@
                 <span class="nav-badge-new">MAIN</span>
             </a>
             <a href="/backups" class="nav-link {% if request.path == '/backups' %}active{% endif %}"><i class="bi bi-archive-fill"></i> Backups</a>
-            <a href="/restore-v2" class="nav-link {% if request.path in ['/restore', '/restore-v2', '/restore-jobs'] %}active{% endif %}"><i class="bi bi-arrow-repeat"></i> Restore<span class="nav-badge-new">V2</span></a>
+            <a href="/restore" class="nav-link {% if request.path in ['/restore', '/restore-v2', '/restore-jobs'] %}active{% endif %}"><i class="bi bi-arrow-repeat"></i> Restore</a>
             <a href="/logs" class="nav-link {% if request.path == '/logs' %}active{% endif %}"><i class="bi bi-terminal-fill"></i> Logs</a>
             <div class="nav-section">System</div>
             <a href="/settings" class="nav-link {% if request.path == '/settings' %}active{% endif %}"><i class="bi bi-gear-fill"></i> Settings<span class="nav-badge-new" style="background:rgba(245,158,11,0.18);color:#fbbf24;">LEGACY</span></a>
@@ -348,15 +366,40 @@
             return (b / 1073741824).toFixed(2) + ' GB';
         }
 
-        function startBackup() {
+        function escapeHtml(value) {
+            return String(value)
+                .replaceAll('&', '&amp;')
+                .replaceAll('<', '&lt;')
+                .replaceAll('>', '&gt;')
+                .replaceAll('"', '&quot;')
+                .replaceAll("'", '&#39;');
+        }
+
+        function escapeAttr(value) {
+            return String(value).replaceAll('"', '&quot;');
+        }
+
+        async function startBackup() {
             if (!confirm('Start legacy incremental backup for all enabled SharePoint sites?')) return;
-            fetch('/api/backup/start', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' })
-                .then(r => r.json()).then(data => {
-                    if (data.task_id) {
-                        showToast('Legacy backup started: ' + data.task_id.substring(0, 8), 'success');
-                        if (typeof pollBackupStatus === 'function') pollBackupStatus(data.task_id);
-                    }
-                });
+            try {
+                const data = await apiCall('/api/backup/start', 'POST', {});
+                if (data.task_id) {
+                    showToast('Legacy backup started: ' + data.task_id.substring(0, 8), 'success');
+                    if (typeof pollBackupStatus === 'function') pollBackupStatus(data.task_id);
+                    if (typeof startPolling === 'function') startPolling(data.task_id);
+                    if (typeof refreshOperationsQueue === 'function') refreshOperationsQueue();
+                    return;
+                }
+                if (data.status === 'queued') {
+                    const pos = data.queue_item && data.queue_item.position ? ` Queue position: ${data.queue_item.position}.` : '';
+                    showToast((data.message || 'Backup queued.') + pos, 'info');
+                    if (typeof refreshOperationsQueue === 'function') refreshOperationsQueue();
+                    return;
+                }
+                showToast(data.error || 'Failed to start backup', 'error');
+            } catch (e) {
+                showToast('Error: ' + (e.message || String(e)), 'error');
+            }
         }
     </script>
     {% block extra_js %}{% endblock %}

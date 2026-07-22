@@ -25,6 +25,9 @@ class TeamsWorkload(BaseWorkload):
             "end_time": None,
             "backup_path": None,
             "teams_count": 0,
+            "targets_available": 0,
+            "targets_in_scope": 0,
+            "selection_mode": "all",
             "targets_processed": 0,
             "targets_failed": 0,
             "files_downloaded": 0,
@@ -67,7 +70,11 @@ class TeamsWorkload(BaseWorkload):
             teams = self.list_targets()
             if teams and teams[0].get("error"):
                 raise Exception(teams[0]["error"])
-            self.stats["teams_count"] = len(teams)
+            teams, selection_info = self.apply_target_selection(teams)
+            self.stats["selection_mode"] = selection_info["mode"]
+            self.stats["targets_available"] = selection_info["available_count"]
+            self.stats["targets_in_scope"] = selection_info["effective_count"]
+            self.stats["teams_count"] = selection_info["effective_count"]
             for idx, team in enumerate(teams, start=1):
                 self._check_control()
                 self._emit("target_start", {"target_name": team["name"], "target_idx": idx, "target_total": len(teams)})
@@ -202,6 +209,9 @@ class TeamsWorkload(BaseWorkload):
             "workload": "teams",
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "teams_count": len(teams),
+            "targets_available": self.stats["targets_available"],
+            "targets_in_scope": self.stats["targets_in_scope"],
+            "selection_mode": self.stats["selection_mode"],
             "files_downloaded": self.stats["files_downloaded"],
             "targets_processed": self.stats["targets_processed"],
             "targets_failed": self.stats["targets_failed"],

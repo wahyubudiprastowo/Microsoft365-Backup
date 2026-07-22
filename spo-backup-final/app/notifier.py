@@ -7,12 +7,15 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 from email.utils import formataddr
 
+from app.http_utils import build_retry_session
+
 log = logging.getLogger("spo_backup")
 
 
 class NotificationDispatcher:
     def __init__(self, config):
         self.config = config
+        self.session = build_retry_session()
 
     def send_all(self, stats, only_channel=None):
         results = []
@@ -30,7 +33,7 @@ class NotificationDispatcher:
                     r = requests.post(
                         f"https://api.telegram.org/bot{tg['bot_token']}/sendMessage",
                         json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"},
-                        timeout=30,
+                        timeout=(10, 30),
                     )
                     r.raise_for_status()
                 results.append({"channel": "telegram", "success": True, "message": "Sent"})
@@ -42,7 +45,8 @@ class NotificationDispatcher:
             try:
                 card = self._build_teams(stats)
                 for url in teams.get("webhook_urls", []):
-                    requests.post(url, json=card, timeout=30)
+                    response = self.session.post(url, json=card, timeout=(10, 30))
+                    response.raise_for_status()
                 results.append({"channel": "teams", "success": True, "message": "Sent"})
             except Exception as e:
                 results.append({"channel": "teams", "success": False, "message": str(e)})
@@ -219,10 +223,10 @@ class NotificationDispatcher:
                 },
                 "saveToSentItems": "false",
             }
-            r = requests.post(
+            r = self.session.post(
                 f"https://graph.microsoft.com/v1.0/users/{notif['email_from']}/sendMail",
                 headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                json=payload, timeout=30,
+                json=payload, timeout=(10, 30),
             )
             r.raise_for_status()
         else:

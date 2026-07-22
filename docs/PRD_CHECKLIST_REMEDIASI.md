@@ -58,7 +58,7 @@ Project folder: `spo-backup-final`
 ### C. Product Navigation
 
 - [~] Bedakan flow `legacy` dan `modern` di navigasi
-- [ ] Putuskan posisi `/restore` vs `/restore-v2`
+- [~] Putuskan posisi `/restore` vs `/restore-v2`
 - [x] Putuskan posisi global schedule vs per-tenant schedule
 
 ### D. Operational Safety
@@ -69,10 +69,11 @@ Project folder: `spo-backup-final`
 
 ## Scope PRD Fase 2: Product Coherence
 
-- [ ] Satukan source of truth tenant slug
+- [x] Satukan source of truth tenant slug
 - [ ] Normalisasi struktur response API yang dibaca UI
 - [ ] Refactor halaman settings menjadi section yang lebih aman
 - [ ] Tambahkan health panel yang membedakan bug aplikasi, auth error, dan permission error
+- [~] Sempitkan boundary restore legacy agar tidak sejajar diam-diam dengan Restore V2
 
 ## Scope PRD Fase 3: Production Readiness
 
@@ -105,7 +106,7 @@ Project folder: `spo-backup-final`
 
 ### Restore UX
 
-- [ ] Restore page harus menampilkan kesiapan tiap workload
+- [x] Restore page harus menampilkan kesiapan tiap workload
 - [ ] Dry-run harus bisa menjadi preflight validation utama
 - [~] Error restore harus informatif untuk operator
 
@@ -122,6 +123,7 @@ Project folder: `spo-backup-final`
 - [ ] Background task post-processing memakai output workload nyata, bukan path asumsi
 - [ ] Logging membedakan auth failure, permission failure, validation failure, dan internal exception
 - [ ] Engine backup/download mendukung skip unchanged, resume partial `.tmp`, dan progressive byte estimation
+- [x] Tenant test UI harus memantulkan warning backend secara penuh, bukan hanya toast ringkas
 
 ## Acceptance Checklist
 
@@ -136,6 +138,7 @@ Project folder: `spo-backup-final`
 - [ ] Backup history mendukung `teams`
 - [x] Schedule product story jelas: global vs tenant
 - [ ] Docs fitur dan readiness terbarui
+- [~] Restore legacy vs Restore V2 boundary tidak lagi membingungkan operator
 
 ### P2 Acceptance
 
@@ -176,10 +179,11 @@ Project folder: `spo-backup-final`
 ### Sprint 3
 
 - [ ] Rapikan settings/raw editor
-- [ ] Samakan tenant slug contract
-- [ ] Jalankan container non-root
+- [x] Samakan tenant slug contract
+- [x] Jalankan container non-root
 - [ ] Tambahkan benchmark backup/download tenant besar dan tuning throughput
 - [~] Perjelas label flow modern vs compatibility di navigasi utama
+- [~] Rapikan boundary restore legacy vs Restore V2
 
 ## Dependency Checklist
 

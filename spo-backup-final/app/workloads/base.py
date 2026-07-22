@@ -5,6 +5,13 @@ import time
 import msal
 import requests
 
+from app.http_utils import (
+    build_retry_session,
+    compute_backoff_delay,
+    is_retryable_exception,
+    is_retryable_status,
+)
+
 
 class BaseWorkload:
     GRAPH = "https://graph.microsoft.com/v1.0"
@@ -15,7 +22,7 @@ class BaseWorkload:
         self.tenant_id = tenant_config["tenant_id"]
         self.client_id = tenant_config["client_id"]
         self.client_secret = tenant_config["client_secret"]
-        self.session = requests.Session()
+        self.session = build_retry_session()
         self._token = None
         self._token_expiry = 0
 
@@ -38,13 +45,28 @@ class BaseWorkload:
         return {"Authorization": f"Bearer {self.get_token()}", "Content-Type": "application/json"}
 
     def _get(self, url, params=None, max_retry=3):
+        response = None
+        last_error = None
         for attempt in range(max_retry):
-            response = self.session.get(url, headers=self._headers(), params=params, timeout=60)
-            if response.status_code == 429 and attempt < max_retry - 1:
-                time.sleep(int(response.headers.get("Retry-After", 30)))
-                continue
-            response.raise_for_status()
-            return response.json()
+            try:
+                response = self.session.get(url, headers=self._headers(), params=params, timeout=(20, 60))
+                if response.status_code == 401 and attempt < max_retry - 1:
+                    self._token = None
+                    self._token_expiry = 0
+                    time.sleep(1)
+                    continue
+                if is_retryable_status(response.status_code) and attempt < max_retry - 1:
+                    time.sleep(compute_backoff_delay(attempt, response=response))
+                    continue
+                response.raise_for_status()
+                return response.json()
+            except Exception as e:
+                last_error = e
+                if not is_retryable_exception(e) or attempt == max_retry - 1:
+                    raise
+                time.sleep(compute_backoff_delay(attempt, response=response))
+        if last_error:
+            raise last_error
         return {}
 
     def _paginate(self, url, params=None):
@@ -55,18 +77,98 @@ class BaseWorkload:
             url = data.get("@odata.nextLink")
             params = None
 
+    def get_target_selection(self):
+        raw = (self.tenant.get("workload_target_selection", {}) or {}).get(self.workload_type, {}) or {}
+        mode = str(raw.get("mode") or "all").strip().lower()
+        selected_ids = []
+        for item in raw.get("selected_ids", []) or []:
+            value = str(item or "").strip()
+            if value:
+                selected_ids.append(value)
+        if mode != "selected" or not selected_ids:
+            mode = "all"
+            selected_ids = []
+        return {
+            "mode": mode,
+            "selected_ids": selected_ids,
+            "selected_count": len(selected_ids),
+        }
+
+    def apply_target_selection(self, targets):
+        targets = list(targets or [])
+        selection = self.get_target_selection()
+        if selection["mode"] != "selected":
+            return targets, {
+                "mode": "all",
+                "available_count": len(targets),
+                "selected_count": 0,
+                "effective_count": len(targets),
+            }
+
+        selected_ids = set(selection["selected_ids"])
+        filtered = [
+            item for item in targets
+            if str(item.get("id") or "").strip() in selected_ids
+        ]
+        return filtered, {
+            "mode": "selected",
+            "available_count": len(targets),
+            "selected_count": len(selected_ids),
+            "effective_count": len(filtered),
+        }
+
     def _download(self, url, dest, size_hint=0):
         if os.path.exists(dest) and size_hint > 0 and os.path.getsize(dest) == size_hint:
             return size_hint
         os.makedirs(os.path.dirname(dest), exist_ok=True)
-        response = self.session.get(url, headers=self._headers(), stream=True, timeout=300)
-        response.raise_for_status()
         tmp = dest + ".tmp"
-        bytes_written = 0
-        with open(tmp, "wb") as handle:
-            for chunk in response.iter_content(chunk_size=65536):
-                if chunk:
-                    handle.write(chunk)
-                    bytes_written += len(chunk)
-        os.replace(tmp, dest)
-        return bytes_written
+        last_error = None
+        for attempt in range(5):
+            response = None
+            resume_from = 0
+            try:
+                headers = self._headers()
+                if os.path.exists(tmp):
+                    resume_from = os.path.getsize(tmp)
+                    if size_hint and resume_from >= size_hint:
+                        os.replace(tmp, dest)
+                        return size_hint
+                    if resume_from > 0:
+                        headers["Range"] = f"bytes={resume_from}-"
+
+                response = self.session.get(url, headers=headers, stream=True, timeout=(20, 300))
+                if is_retryable_status(response.status_code) and attempt < 4:
+                    response.close()
+                    time.sleep(compute_backoff_delay(attempt, response=response))
+                    continue
+                response.raise_for_status()
+
+                bytes_written = resume_from
+                mode = "ab" if resume_from else "wb"
+                if resume_from and response.status_code == 200:
+                    mode = "wb"
+                    bytes_written = 0
+                    try:
+                        os.remove(tmp)
+                    except OSError:
+                        pass
+                with open(tmp, mode) as handle:
+                    for chunk in response.iter_content(chunk_size=65536):
+                        if chunk:
+                            handle.write(chunk)
+                            bytes_written += len(chunk)
+                os.replace(tmp, dest)
+                return bytes_written
+            except Exception as e:
+                last_error = e
+                if response is not None:
+                    try:
+                        response.close()
+                    except Exception:
+                        pass
+                if not is_retryable_exception(e) or attempt == 4:
+                    raise
+                time.sleep(compute_backoff_delay(attempt))
+        if last_error:
+            raise last_error
+        raise RuntimeError(f"Download failed for {dest}")

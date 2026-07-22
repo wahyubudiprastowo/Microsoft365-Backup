@@ -60,6 +60,22 @@ services:
     depends_on: [redis, spo-backup]
     networks: [backup-net]
 
+  celery-restore-worker:
+    image: spo-backup:v4
+    container_name: spo-backup-restore-worker
+    restart: unless-stopped
+    user: "${SPO_UID:-1000}:${SPO_GID:-1000}"
+    command: celery -A app.tasks worker --loglevel=info --concurrency=1 -Q restore
+    volumes:
+      - ${SPO_DATA_DIR:-../data}:/backup/sharepoint
+      - ${SPO_CONFIG_FILE:-../config/config.json}:/app/config.json
+      - ${SPO_LOG_DIR:-../logs}:/app/logs
+    environment:
+      - TZ=${TZ:-Asia/Jakarta}
+      - CONFIG_PATH=/app/config.json
+    depends_on: [redis, spo-backup]
+    networks: [backup-net]
+
   celery-beat:
     image: spo-backup:v4
     container_name: spo-backup-scheduler

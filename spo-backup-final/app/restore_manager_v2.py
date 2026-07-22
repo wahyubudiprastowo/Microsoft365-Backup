@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import redis as redis_lib
+from celery.result import AsyncResult
 
 from app.backup_registry import BackupRegistry
 from app.workloads import WORKLOAD_META, get_workload
@@ -23,6 +24,20 @@ class RestoreManagerV2:
 
     def _job_key(self, job_id: str) -> str:
         return self.JOB_PREFIX + job_id
+
+    def _normalize_job_record(self, job: dict | None) -> dict | None:
+        if not job:
+            return job
+        errors = []
+        if isinstance(job.get("result"), dict):
+            errors.extend(job["result"].get("errors") or [])
+        if job.get("error"):
+            errors.append(job.get("error"))
+        if job.get("status") == "completed" and any(str(err).startswith("Fatal:") for err in errors):
+            job["status"] = "failed"
+            job["error"] = "; ".join(str(err) for err in errors[:3])
+            self.r.set(self._job_key(job["id"]), json.dumps(job))
+        return job
 
     def create_job(self, config: dict) -> dict:
         workload, mode, backup_path = self._validate_config(config)
@@ -48,6 +63,8 @@ class RestoreManagerV2:
         if workload == "sharepoint":
             job["target_site_id"] = config.get("target_site_id")
             job["target_site_path"] = config.get("target_site_path")
+            job["target_library_name"] = config.get("target_library_name")
+            job["target_folder_path"] = config.get("target_folder_path")
         elif workload == "onedrive":
             job["user_mapping"] = config.get("user_mapping", {})
             job["target_folder"] = config.get("target_folder", "M365 Restored")
@@ -66,7 +83,7 @@ class RestoreManagerV2:
 
     def get_job(self, job_id: str):
         data = self.r.get(self._job_key(job_id))
-        return json.loads(data) if data else None
+        return self._normalize_job_record(json.loads(data)) if data else None
 
     def list_jobs(self, limit: int = 50):
         ids = self.r.lrange(self.JOB_LIST, 0, max(limit - 1, 0))
@@ -94,6 +111,84 @@ class RestoreManagerV2:
         self.r.delete(self._job_key(job_id))
         self.r.lrem(self.JOB_LIST, 0, job_id)
         return True
+
+    def _list_restore_task_ids(self) -> set[str]:
+        try:
+            from app.tasks import celery_app
+
+            inspector = celery_app.control.inspect(timeout=1.5)
+            snapshots = [
+                inspector.active() or {},
+                inspector.reserved() or {},
+                inspector.scheduled() or {},
+            ]
+            task_ids = set()
+            for payload in snapshots:
+                for worker_tasks in payload.values():
+                    for raw_item in worker_tasks or []:
+                        item = raw_item.get("request", raw_item) if isinstance(raw_item, dict) and "request" in raw_item else raw_item
+                        if not isinstance(item, dict):
+                            continue
+                        if item.get("name") != "app.tasks.execute_restore_job_v2" and item.get("type") != "app.tasks.execute_restore_job_v2":
+                            continue
+                        task_id = item.get("id")
+                        if task_id:
+                            task_ids.add(task_id)
+            return task_ids
+        except Exception as e:
+            log.warning(f"Failed to inspect restore task state: {e}")
+            return set()
+
+    def recover_stale_queued_jobs(self, limit: int = 100) -> list[dict]:
+        from app.operation_queue import OperationQueue
+        from app.tasks import celery_app
+
+        queue = OperationQueue()
+        queue_items = {
+            (item.get("payload") or {}).get("job_id"): item
+            for item in queue.list("restore", limit=max(limit * 2, 100))
+        }
+        active_task_ids = self._list_restore_task_ids()
+        recovered = []
+
+        for job in self.list_jobs(limit=limit):
+            if job.get("status") != "queued":
+                continue
+
+            job_id = job["id"]
+            task_id = job.get("task_id")
+            if task_id and task_id not in active_task_ids:
+                state = str(AsyncResult(task_id, app=celery_app).state or "").upper()
+                if state in {"FAILURE", "BACKUP_FAILED"}:
+                    self.update_job(job_id, {
+                        "status": "failed",
+                        "error": "Restore task stopped before completion.",
+                        "completed_at": datetime.now(timezone.utc).isoformat(),
+                    })
+                    recovered.append({"job_id": job_id, "action": "marked_failed", "task_id": task_id})
+                    continue
+                if state == "REVOKED":
+                    self.update_job(job_id, {
+                        "status": "cancelled",
+                        "completed_at": datetime.now(timezone.utc).isoformat(),
+                    })
+                    recovered.append({"job_id": job_id, "action": "marked_cancelled", "task_id": task_id})
+                    continue
+                self.update_job(job_id, {"task_id": None, "started_at": None})
+                job["task_id"] = None
+                recovered.append({"job_id": job_id, "action": "requeue_dispatch", "task_id": task_id})
+
+            if not job.get("task_id") and job_id not in queue_items:
+                queue.enqueue(
+                    "restore",
+                    "restore_v2",
+                    {"job_id": job_id},
+                    f"Restore {job.get('workload', 'job')}",
+                    f"{job.get('tenant_name') or 'Unknown tenant'} · {job.get('source_backup') or ''}",
+                )
+                recovered.append({"job_id": job_id, "action": "queued"})
+
+        return recovered
 
     def execute(self, job_id: str, task_id: str = None) -> dict:
         from app.restore import get_restore
@@ -135,6 +230,8 @@ class RestoreManagerV2:
         if job["workload"] == "sharepoint":
             kwargs["target_site_id"] = job.get("target_site_id")
             kwargs["target_site_path"] = job.get("target_site_path")
+            kwargs["target_library_name"] = job.get("target_library_name")
+            kwargs["target_folder_path"] = job.get("target_folder_path")
         elif job["workload"] == "onedrive":
             kwargs["user_mapping"] = job.get("user_mapping", {})
             kwargs["target_folder"] = job.get("target_folder", "Restored")
@@ -158,12 +255,15 @@ class RestoreManagerV2:
             status = "completed"
             if result.get("cancelled"):
                 status = "cancelled"
+            elif any(str(err).startswith("Fatal:") for err in (result.get("errors") or [])):
+                status = "failed"
             elif result.get("targets_failed", 0) > 0 and result.get("targets_processed", 0) == 0:
                 status = "failed"
             self.update_job(job_id, {
                 "status": status,
-                "progress": 100 if status != "cancelled" else job.get("progress", 0),
+                "progress": 100 if status in {"completed", "failed"} else job.get("progress", 0),
                 "completed_at": datetime.now(timezone.utc).isoformat(),
+                "error": "; ".join(str(err) for err in (result.get("errors") or [])[:3]) if status == "failed" else None,
                 "result": result,
             })
             return result
@@ -195,6 +295,8 @@ class RestoreManagerV2:
         if workload == "sharepoint":
             kwargs["target_site_id"] = config.get("target_site_id")
             kwargs["target_site_path"] = config.get("target_site_path")
+            kwargs["target_library_name"] = config.get("target_library_name")
+            kwargs["target_folder_path"] = config.get("target_folder_path")
         elif workload == "onedrive":
             kwargs["user_mapping"] = config.get("user_mapping", {})
             kwargs["target_folder"] = config.get("target_folder", "M365 Restored")

@@ -22,7 +22,12 @@ WORKLOAD_META = {
         "description": "Sites and document libraries",
         "supports_backup": True,
         "supports_target_discovery": True,
+        "supports_target_selection": False,
         "required_scopes": ["Sites.Read.All", "Files.Read.All"],
+        "backup_scope": "Backs up enabled SharePoint sites from the Sites page.",
+        "selection_label": "Scope is controlled from Sites, not from this target picker.",
+        "manage_href": "/sites",
+        "manage_label": "Manage Sites",
     },
     "onedrive": {
         "name": "OneDrive for Business",
@@ -31,7 +36,12 @@ WORKLOAD_META = {
         "description": "User files and folders",
         "supports_backup": True,
         "supports_target_discovery": True,
+        "supports_target_selection": True,
         "required_scopes": ["Files.Read.All", "User.Read.All"],
+        "backup_scope": "Backs up all discovered user drives by default, or only selected users if a target scope is saved here.",
+        "selection_label": "You can switch between all discovered users and a saved selected-user scope.",
+        "manage_href": "/backups",
+        "manage_label": "Open Backup History",
     },
     "outlook": {
         "name": "Outlook / Exchange",
@@ -40,7 +50,12 @@ WORKLOAD_META = {
         "description": "Mail, calendar, contacts",
         "supports_backup": True,
         "supports_target_discovery": True,
+        "supports_target_selection": True,
         "required_scopes": ["Mail.Read", "Calendars.Read", "Contacts.Read", "User.Read.All"],
+        "backup_scope": "Backs up all discovered mailboxes by default, or only selected users if a target scope is saved here.",
+        "selection_label": "You can save a mailbox subset for tenant-aware backup runs.",
+        "manage_href": "/restore",
+        "manage_label": "Open Restore",
     },
     "teams": {
         "name": "Microsoft Teams",
@@ -49,6 +64,7 @@ WORKLOAD_META = {
         "description": "Teams, channels, messages, replies, files metadata",
         "supports_backup": True,
         "supports_target_discovery": True,
+        "supports_target_selection": True,
         "required_scopes": [
             "Team.ReadBasic.All",
             "Channel.ReadBasic.All",
@@ -57,6 +73,10 @@ WORKLOAD_META = {
             "TeamMember.Read.All",
             "Files.Read.All",
         ],
+        "backup_scope": "Backs up all discovered Teams by default, or only selected teams if a target scope is saved here.",
+        "selection_label": "Use target selection to limit which Teams are included in tenant-aware runs.",
+        "manage_href": "/backups",
+        "manage_label": "Open Backup History",
     },
 }
 

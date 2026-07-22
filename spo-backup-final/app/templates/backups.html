@@ -16,7 +16,10 @@
         <div style="flex:1;min-width:260px;">
             <div style="font-weight:700;font-size:15px;">Modern Backup Flow</div>
             <div style="color:var(--text-muted);font-size:13px;margin-top:4px;">
-                Halaman ini adalah flow utama backup tenant-aware multi-workload. Backup layout `legacy` masih ditampilkan untuk kompatibilitas dan audit history.
+                This page is the primary tenant-aware multi-workload backup flow. `legacy` backup entries are still shown for compatibility and audit history.
+            </div>
+            <div style="color:var(--accent);font-size:12px;margin-top:8px;">
+                If another backup is still running, new requests are automatically queued and started after the active task finishes.
             </div>
         </div>
     </div>
@@ -54,6 +57,9 @@
             <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-dim);margin-top:8px;">
                 <span id="bpSpeed">0 KB/s</span>
                 <span id="bpEta">--</span>
+            </div>
+            <div style="display:flex;justify-content:flex-end;font-size:11px;color:var(--text-dim);margin-top:6px;">
+                <span>Live Size: <strong id="bpLiveSize" style="color:var(--accent);">0 B</strong></span>
             </div>
         </div>
     </div>
@@ -131,12 +137,37 @@
     </div>
 </div>
 
+<div class="modal fade" id="backupContentsModal" tabindex="-1">
+    <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content" style="background:var(--bg-elevated);border:1px solid var(--border);border-radius:16px;">
+            <div class="modal-header" style="border-bottom:1px solid var(--border);">
+                <div>
+                    <h5 class="modal-title" id="backupContentsTitle" style="margin-bottom:4px;">Backup Contents</h5>
+                    <div id="backupContentsSubtitle" style="font-size:12px;color:var(--text-dim);"></div>
+                </div>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div style="background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:14px;">
+                    <div style="font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:1px;font-weight:700;margin-bottom:6px;">Directory Path</div>
+                    <div id="backupDirectoryPath" style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text);word-break:break-all;">-</div>
+                </div>
+                <div id="backupContentsBreadcrumbs" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;"></div>
+                <div id="backupContentsBody" style="min-height:120px;color:var(--text-dim);">Loading...</div>
+            </div>
+            <div class="modal-footer" style="border-top:1px solid var(--border);">
+                <button type="button" class="btn-modern btn-ghost-modern" data-bs-dismiss="modal">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <style>
 .backup-row {
     padding: 16px 20px;
     border-bottom: 1px solid var(--border);
     display: grid;
-    grid-template-columns: 1.2fr 0.8fr 1.2fr 0.8fr 0.8fr 0.8fr 52px;
+    grid-template-columns: 1.1fr 0.8fr 1.5fr 0.8fr 0.8fr 0.8fr 180px;
     align-items: center;
     gap: 14px;
     transition: background 0.2s;
@@ -194,6 +225,8 @@
 let allBackups = [];
 let backupTaskId = null;
 let backupPoll = null;
+let backupPollTick = 0;
+let backupContentsContext = null;
 
 async function loadStats() {
     const stats = await apiCall('/api/v2/backups/stats');
@@ -242,19 +275,23 @@ function applyFilters() {
         return;
     }
 
-    let html = `<div style="padding:12px 20px;border-bottom:1px solid var(--border);background:rgba(255,255,255,0.02);display:grid;grid-template-columns:1.2fr 0.8fr 1.2fr 0.8fr 0.8fr 0.8fr 52px;gap:14px;font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.5px;">
+    let html = `<div style="padding:12px 20px;border-bottom:1px solid var(--border);background:rgba(255,255,255,0.02);display:grid;grid-template-columns:1.1fr 0.8fr 1.5fr 0.8fr 0.8fr 0.8fr 180px;gap:14px;font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.5px;">
         <div>Tenant</div>
         <div>Workload</div>
         <div>Backup</div>
         <div>Files</div>
         <div>Size</div>
         <div>Layout</div>
-        <div></div>
+        <div>Actions</div>
     </div>`;
 
     filtered.forEach(item => {
         const workloadClass = `wl-${item.workload || 'sharepoint'}`;
         const layoutClass = `layout-${item.layout || 'legacy'}`;
+        const summary = item.summary || 'Backup folder';
+        const targetPreview = Array.isArray(item.target_names_preview) && item.target_names_preview.length
+            ? item.target_names_preview.join(', ') + (item.target_names_more ? ` +${item.target_names_more} more` : '')
+            : '';
         html += `<div class="backup-row">
             <div>
                 <span class="badge-tenant">${escapeHtml(item.tenant_name || item.tenant_slug || 'Unknown')}</span>
@@ -263,13 +300,23 @@ function applyFilters() {
             <div><span class="badge-workload ${workloadClass}">${escapeHtml(item.workload || 'sharepoint')}</span></div>
             <div>
                 <div style="font-family:'JetBrains Mono',monospace;font-size:12px;">${escapeHtml(item.backup_name)}</div>
+                <div style="font-size:12px;color:var(--text-muted);margin-top:4px;line-height:1.5;">${escapeHtml(summary)}</div>
+                ${targetPreview ? `<div style="font-size:10px;color:var(--text-dim);margin-top:4px;">Contains: ${escapeHtml(targetPreview)}</div>` : ''}
                 <div style="font-size:10px;color:var(--text-dim);margin-top:2px;">${escapeHtml(item.date)}</div>
             </div>
-            <div style="font-weight:600;">${item.files_count || 0}</div>
+            <div style="font-weight:600;">
+                ${(item.files_count || 0).toLocaleString()}
+                <div style="font-size:10px;color:var(--text-dim);margin-top:4px;">
+                    ${item.targets_count ? `${item.targets_count} target(s)` : 'Target count n/a'}
+                </div>
+            </div>
             <div style="font-weight:600;color:var(--accent);">${escapeHtml(item.size_human || '0 B')}</div>
             <div><span class="badge-layout ${layoutClass}">${escapeHtml(item.layout || 'legacy')}</span></div>
-            <div>
-                <button class="btn-modern btn-danger-modern" onclick="deleteBackup('${encodeURIComponent(item.tenant_slug || '')}','${encodeURIComponent(item.workload || 'sharepoint')}','${encodeURIComponent(item.backup_name)}')" style="padding:4px 8px;font-size:11px;" title="Delete">
+            <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;">
+                <button class="btn-modern btn-ghost-modern" onclick="openBackupContents('${encodeURIComponent(item.tenant_slug || '')}','${encodeURIComponent(item.workload || 'sharepoint')}','${encodeURIComponent(item.backup_name)}')" style="padding:6px 10px;font-size:11px;" title="View Contents">
+                    <i class="bi bi-folder2-open"></i> View Contents
+                </button>
+                <button class="btn-modern btn-danger-modern" onclick="deleteBackup('${encodeURIComponent(item.tenant_slug || '')}','${encodeURIComponent(item.workload || 'sharepoint')}','${encodeURIComponent(item.backup_name)}')" style="padding:6px 10px;font-size:11px;" title="Delete">
                     <i class="bi bi-trash"></i>
                 </button>
             </div>
@@ -299,6 +346,117 @@ async function deleteBackup(tenantSlug, workload, backupName) {
     }
 }
 
+function formatEntrySize(entry) {
+    if (entry.type === 'directory') {
+        if (typeof entry.children_count === 'number') {
+            return `${entry.children_count} item(s)`;
+        }
+        return 'directory';
+    }
+    return entry.size_human || '0 B';
+}
+
+function renderBackupBreadcrumbs(currentPath) {
+    const wrap = document.getElementById('backupContentsBreadcrumbs');
+    if (!wrap || !backupContentsContext) return;
+    const bits = currentPath ? currentPath.split('/').filter(Boolean) : [];
+    const parts = [{ label: 'root', path: '' }];
+    let running = '';
+    bits.forEach(bit => {
+        running = running ? `${running}/${bit}` : bit;
+        parts.push({ label: bit, path: running });
+    });
+    wrap.innerHTML = parts.map((part, index) => {
+        const isLast = index === parts.length - 1;
+        return `<button class="btn-modern ${isLast ? 'btn-primary-modern' : 'btn-ghost-modern'}" onclick="openBackupContentsPath('${escapeAttr(backupContentsContext.tenantSlug)}','${escapeAttr(backupContentsContext.workload)}','${escapeAttr(backupContentsContext.backupName)}','${escapeAttr(part.path)}')" style="padding:5px 10px;font-size:11px;">${escapeHtml(part.label)}</button>`;
+    }).join('');
+}
+
+function renderBackupContents(payload) {
+    const backup = payload.backup || {};
+    document.getElementById('backupContentsTitle').textContent = backup.backup_name || 'Backup Contents';
+    document.getElementById('backupContentsSubtitle').textContent = backup.summary || `${backup.workload || 'backup'} • ${backup.date || ''}`;
+    document.getElementById('backupDirectoryPath').textContent = payload.current_path
+        ? `${payload.backup_root}/${payload.current_path}`
+        : payload.backup_root || '-';
+    renderBackupBreadcrumbs(payload.current_path || '');
+
+    const entries = payload.entries || [];
+    if (!entries.length) {
+        document.getElementById('backupContentsBody').innerHTML = '<div style="color:var(--text-dim);">Directory is empty.</div>';
+        return;
+    }
+
+    document.getElementById('backupContentsBody').innerHTML = `
+        <table class="table-modern">
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th style="width:120px;">Type</th>
+                    <th style="width:140px;">Size</th>
+                    <th style="width:180px;">Modified</th>
+                    <th style="width:120px;text-align:right;">Action</th>
+                </tr>
+            </thead>
+            <tbody>
+                ${entries.map(entry => `
+                    <tr>
+                        <td>
+                            <div style="display:flex;align-items:center;gap:10px;">
+                                <i class="bi ${entry.type === 'directory' ? 'bi-folder-fill' : 'bi-file-earmark-text'}" style="color:${entry.type === 'directory' ? 'var(--warning)' : 'var(--accent)'};"></i>
+                                <div>
+                                    <div style="font-weight:600;">${escapeHtml(entry.name)}</div>
+                                    <div style="font-size:10px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;">${escapeHtml(entry.relative_path || '')}</div>
+                                </div>
+                            </div>
+                        </td>
+                        <td><span class="badge-modern ${entry.type === 'directory' ? 'badge-warning' : 'badge-info'}">${escapeHtml(entry.type)}</span></td>
+                        <td>${escapeHtml(formatEntrySize(entry))}</td>
+                        <td>${escapeHtml(entry.modified || '-')}</td>
+                        <td style="text-align:right;">
+                            ${entry.type === 'directory'
+                                ? `<button class="btn-modern btn-ghost-modern" onclick="openBackupContentsPath('${escapeAttr(backupContentsContext.tenantSlug)}','${escapeAttr(backupContentsContext.workload)}','${escapeAttr(backupContentsContext.backupName)}','${escapeAttr(entry.relative_path)}')" style="padding:5px 10px;font-size:11px;">Open</button>`
+                                : '<span style="font-size:11px;color:var(--text-dim);">file</span>'}
+                        </td>
+                    </tr>
+                `).join('')}
+            </tbody>
+        </table>`;
+}
+
+async function openBackupContents(tenantSlug, workload, backupName) {
+    const decoded = {
+        tenantSlug: decodeURIComponent(tenantSlug),
+        workload: decodeURIComponent(workload),
+        backupName: decodeURIComponent(backupName),
+    };
+    backupContentsContext = decoded;
+    document.getElementById('backupContentsTitle').textContent = decoded.backupName;
+    document.getElementById('backupContentsSubtitle').textContent = 'Loading backup contents...';
+    document.getElementById('backupDirectoryPath').textContent = '-';
+    document.getElementById('backupContentsBreadcrumbs').innerHTML = '';
+    document.getElementById('backupContentsBody').innerHTML = '<div style="color:var(--text-dim);">Loading...</div>';
+    new bootstrap.Modal(document.getElementById('backupContentsModal')).show();
+    await openBackupContentsPath(decoded.tenantSlug, decoded.workload, decoded.backupName, '');
+}
+
+async function openBackupContentsPath(tenantSlug, workload, backupName, relativePath = '') {
+    backupContentsContext = { tenantSlug, workload, backupName };
+    const url = `/api/v2/backups/${encodeURIComponent(tenantSlug)}/${encodeURIComponent(workload)}/${encodeURIComponent(backupName)}/contents?path=${encodeURIComponent(relativePath || '')}`;
+    try {
+        const payload = await apiCall(url);
+        if (payload.error) {
+            showToast(payload.error, 'error');
+            document.getElementById('backupContentsBody').innerHTML = `<div style="color:var(--danger);">${escapeHtml(payload.error)}</div>`;
+            return;
+        }
+        renderBackupContents(payload);
+    } catch (e) {
+        showToast('Failed to load backup contents: ' + e.message, 'error');
+        document.getElementById('backupContentsBody').innerHTML = `<div style="color:var(--danger);">${escapeHtml(e.message)}</div>`;
+    }
+}
+
 async function startTenantAwareBackup() {
     if (!confirm('Start backup for active tenant using tenant-aware layout?')) return;
     try {
@@ -312,6 +470,10 @@ async function startTenantAwareBackup() {
                 res.warnings.forEach(msg => showToast(msg, 'warning'));
             }
             setTimeout(() => refreshList(true), 1500);
+        } else if (res.status === 'queued') {
+            const pos = res.queue_item && res.queue_item.position ? ` Queue position: ${res.queue_item.position}.` : '';
+            showToast((res.message || 'Backup queued.') + pos, 'info');
+            setTimeout(() => refreshList(true), 600);
         } else {
             showToast(res.error || 'Failed', 'error');
         }
@@ -325,24 +487,36 @@ async function checkActiveBackupTask() {
     if (res.backup_task_id) {
         backupTaskId = res.backup_task_id;
         document.getElementById('backupProgressPanel').style.display = 'block';
+        if (res.backup && res.backup.meta) {
+            hydrateBackupProgress(res.backup.meta);
+        }
         pollBackupStatus(res.backup_task_id);
     }
+}
+
+function hydrateBackupProgress(meta) {
+    const m = meta || {};
+    document.getElementById('bpFiles').textContent = `${m.files_done || 0} / ${m.files_total || 0}`;
+    document.getElementById('bpDownloaded').textContent = (m.files_downloaded || 0).toLocaleString();
+    document.getElementById('bpSkipped').textContent = (m.files_skipped || 0).toLocaleString();
+    document.getElementById('bpResumed').textContent = (m.files_resumed || 0).toLocaleString();
+    document.getElementById('bpCurrentFile').textContent = m.current_file || m.current_site || 'Working...';
+    document.getElementById('bpPct').textContent = `${m.overall_pct || 0}%`;
+    document.getElementById('bpBar').style.width = `${m.overall_pct || 0}%`;
+    document.getElementById('bpSpeed').textContent = m.is_paused ? 'Paused' : (m.speed_human || '0 KB/s');
+    document.getElementById('bpEta').textContent = m.is_paused ? '--' : (m.eta_human || '--');
+    document.getElementById('bpLiveSize').textContent = formatBytes(m.bytes_done || m.bytes_downloaded || 0);
 }
 
 function pollBackupStatus(taskId) {
     if (backupPoll) clearInterval(backupPoll);
     backupPoll = setInterval(async () => {
         const data = await apiCall(`/api/backup/status/${taskId}`);
-        const m = data.meta || {};
-        document.getElementById('bpFiles').textContent = `${m.files_done || 0} / ${m.files_total || 0}`;
-        document.getElementById('bpDownloaded').textContent = (m.files_downloaded || 0).toLocaleString();
-        document.getElementById('bpSkipped').textContent = (m.files_skipped || 0).toLocaleString();
-        document.getElementById('bpResumed').textContent = (m.files_resumed || 0).toLocaleString();
-        document.getElementById('bpCurrentFile').textContent = m.current_file || m.current_site || 'Working...';
-        document.getElementById('bpPct').textContent = `${m.overall_pct || 0}%`;
-        document.getElementById('bpBar').style.width = `${m.overall_pct || 0}%`;
-        document.getElementById('bpSpeed').textContent = m.is_paused ? 'Paused' : (m.speed_human || '0 KB/s');
-        document.getElementById('bpEta').textContent = m.is_paused ? '--' : (m.eta_human || '--');
+        hydrateBackupProgress(data.meta || {});
+        backupPollTick += 1;
+        if (backupPollTick % 10 === 0) {
+            loadStats();
+        }
 
         if (data.state === 'SUCCESS' || data.state === 'BACKUP_FAILED' || data.state === 'FAILURE' || data.state === 'REVOKED' || data.state === 'UNKNOWN') {
             clearInterval(backupPoll);

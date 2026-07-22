@@ -10,9 +10,9 @@
         <div style="flex:1;min-width:260px;">
             <div style="font-weight:700;font-size:15px;">Operational Mode Guide</div>
             <div style="color:var(--text-muted);font-size:13px;margin-top:4px;">
-                Untuk operasi harian multi-tenant, gunakan <a href="/backups" style="color:var(--accent);font-weight:600;">Backups</a>,
-                <a href="/restore-v2" style="color:var(--accent);font-weight:600;">Restore V2</a>, dan <a href="/schedules" style="color:var(--accent);font-weight:600;">Schedules</a>.
-                Tombol legacy di dashboard ini hanya untuk flow SharePoint lama.
+                For daily multi-tenant operations, use <a href="/backups" style="color:var(--accent);font-weight:600;">Backups</a>,
+                <a href="/restore" style="color:var(--accent);font-weight:600;">Restore</a>, and <a href="/schedules" style="color:var(--accent);font-weight:600;">Schedules</a> as the primary workflow.
+                This dashboard is mainly for monitoring active tasks, the operations queue, and the legacy SharePoint-only backup flow. The button in the top-right corner starts the older SharePoint backup engine for enabled sites from the legacy single-schedule layout.
             </div>
         </div>
     </div>
@@ -20,20 +20,27 @@
 <div class="row g-4 mb-4">
     <div class="col-md-3"><div class="stat-card">
         <div class="stat-icon" style="background:rgba(99,102,241,0.15);color:var(--primary);"><i class="bi bi-globe2"></i></div>
-        <div class="stat-value">{{ config.sites|length }}</div><div class="stat-label">Total Sites</div>
+        <div class="stat-value" id="dashSitesTotal">{{ dashboard_summary.sites_total }}</div><div class="stat-label">Total Sites</div>
     </div></div>
     <div class="col-md-3"><div class="stat-card">
         <div class="stat-icon" style="background:rgba(16,185,129,0.15);color:var(--success);"><i class="bi bi-check-circle-fill"></i></div>
-        <div class="stat-value">{{ config.sites|selectattr('enabled')|list|length }}</div><div class="stat-label">Enabled Sites</div>
+        <div class="stat-value" id="dashSitesEnabled">{{ dashboard_summary.sites_enabled }}</div><div class="stat-label">Enabled Sites</div>
     </div></div>
     <div class="col-md-3"><div class="stat-card">
         <div class="stat-icon" style="background:rgba(6,182,212,0.15);color:var(--accent);"><i class="bi bi-archive-fill"></i></div>
-        <div class="stat-value">{{ backups|length }}</div><div class="stat-label">Total Backups</div>
+        <div class="stat-value" id="dashBackupsTotal">{{ dashboard_summary.backups_total }}</div><div class="stat-label">Total Backups</div>
     </div></div>
     <div class="col-md-3"><div class="stat-card">
         <div class="stat-icon" style="background:rgba(245,158,11,0.15);color:var(--warning);"><i class="bi bi-clock-fill"></i></div>
-        <div class="stat-value" style="font-size:18px;font-family:'JetBrains Mono',monospace;">{{ config.schedule.cron_expression }}</div>
-        <div class="stat-label">Cron Schedule</div>
+        <div class="stat-value" id="dashCronExpr" style="font-size:18px;font-family:'JetBrains Mono',monospace;">{{ dashboard_summary.schedule.cron_expression }}</div>
+        <div class="stat-label" id="dashCronScope">{{ dashboard_summary.schedule.scope }}</div>
+        <div style="margin-top:8px;font-size:11px;color:var(--text-muted);line-height:1.6;">
+            <div id="dashCronOwner">{{ dashboard_summary.schedule.owner }}</div>
+            <div>
+                <span id="dashCronStatus" style="color:{% if dashboard_summary.schedule.enabled %}var(--success){% else %}var(--text-dim){% endif %};font-weight:700;">{% if dashboard_summary.schedule.enabled %}Enabled{% else %}Disabled{% endif %}</span>
+                · <span id="dashCronTimezone">{{ dashboard_summary.schedule.timezone }}</span>
+            </div>
+        </div>
     </div></div>
 </div>
 
@@ -63,17 +70,21 @@
             </div></div>
         </div>
         <div class="row g-3 mb-3">
-            <div class="col-md-4"><div style="background:rgba(16,185,129,0.06);border:1px solid rgba(16,185,129,0.2);border-radius:10px;padding:12px;">
+            <div class="col-md-3"><div style="background:rgba(16,185,129,0.06);border:1px solid rgba(16,185,129,0.2);border-radius:10px;padding:12px;">
                 <div style="font-size:10px;color:var(--text-muted);font-weight:700;text-transform:uppercase;letter-spacing:1px;">Downloaded Files</div>
                 <div id="bFilesDownloaded" style="font-size:18px;font-weight:700;margin-top:4px;">0</div>
             </div></div>
-            <div class="col-md-4"><div style="background:rgba(100,116,139,0.08);border:1px solid rgba(100,116,139,0.2);border-radius:10px;padding:12px;">
+            <div class="col-md-3"><div style="background:rgba(100,116,139,0.08);border:1px solid rgba(100,116,139,0.2);border-radius:10px;padding:12px;">
                 <div style="font-size:10px;color:var(--text-muted);font-weight:700;text-transform:uppercase;letter-spacing:1px;">Skipped Unchanged</div>
                 <div id="bFilesSkipped" style="font-size:18px;font-weight:700;margin-top:4px;">0</div>
             </div></div>
-            <div class="col-md-4"><div style="background:rgba(6,182,212,0.08);border:1px solid rgba(6,182,212,0.2);border-radius:10px;padding:12px;">
+            <div class="col-md-3"><div style="background:rgba(6,182,212,0.08);border:1px solid rgba(6,182,212,0.2);border-radius:10px;padding:12px;">
                 <div style="font-size:10px;color:var(--text-muted);font-weight:700;text-transform:uppercase;letter-spacing:1px;">Resumed Files</div>
                 <div id="bFilesResumed" style="font-size:18px;font-weight:700;margin-top:4px;">0</div>
+            </div></div>
+            <div class="col-md-3"><div style="background:rgba(99,102,241,0.08);border:1px solid rgba(99,102,241,0.2);border-radius:10px;padding:12px;">
+                <div style="font-size:10px;color:var(--text-muted);font-weight:700;text-transform:uppercase;letter-spacing:1px;">Live Size</div>
+                <div id="bLiveSize" style="font-size:18px;font-weight:700;margin-top:4px;">0 B</div>
             </div></div>
         </div>
         <div style="background:rgba(255,255,255,0.02);border:1px solid var(--border);border-radius:10px;padding:14px;">
@@ -100,6 +111,18 @@
             <button class="btn-modern btn-danger-modern" onclick="cancelBackup()" id="bCancelBtn">
                 <i class="bi bi-x-circle-fill"></i> Cancel
             </button>
+        </div>
+    </div>
+</div>
+
+<div class="glass-card mb-4">
+    <div class="card-header">
+        <h6><i class="bi bi-list-task" style="color:var(--primary);"></i> Operations Queue</h6>
+        <span class="badge-modern badge-primary" id="opsQueueCount">0 queued</span>
+    </div>
+    <div class="card-body">
+        <div id="opsQueueList" style="display:grid;gap:10px;">
+            <div style="color:var(--text-dim);font-size:13px;">Loading operations...</div>
         </div>
     </div>
 </div>
@@ -147,6 +170,33 @@ let backupPollInterval = null;
 let cancelInProgress = false;
 let lastBackupToastKey = null;
 
+function formatOperationMeta(item) {
+    if (!item) return '';
+    if (item.current_target) return item.current_target;
+    if (item.meta && item.meta.current_site) return item.meta.current_site;
+    if (item.meta && item.meta.current_file) return item.meta.current_file;
+    if (item.detail) return item.detail;
+    return '';
+}
+
+function renderOperationCard(title, status, detail, tone = 'var(--primary)', queueId = null) {
+    const cancelBtn = queueId
+        ? `<button class="btn-modern btn-danger-modern" onclick="deleteQueueItem('${queueId}')" style="padding:4px 10px;font-size:11px;"><i class="bi bi-x"></i> Remove</button>`
+        : '';
+    return `<div style="border:1px solid var(--border);border-radius:12px;padding:12px 14px;background:rgba(255,255,255,0.02);">
+        <div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start;">
+            <div style="min-width:0;flex:1;">
+                <div style="font-weight:700;font-size:13px;">${escapeHtml(title)}</div>
+                <div style="font-size:12px;color:var(--text-muted);margin-top:4px;word-break:break-word;">${escapeHtml(detail || 'No extra detail')}</div>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;">
+                <span class="badge-modern" style="background:${tone}1A;color:${tone};">${escapeHtml(status)}</span>
+                ${cancelBtn}
+            </div>
+        </div>
+    </div>`;
+}
+
 function showBackupToastOnce(message, level = 'error') {
     const key = `${level}:${message}`;
     if (lastBackupToastKey === key) return;
@@ -162,9 +212,42 @@ async function checkActiveTask() {
             currentBackupTaskId = res.backup_task_id;
             document.getElementById('bTaskId').textContent = res.backup_task_id.substring(0, 8) + '...';
             document.getElementById('progressPanel').style.display = 'block';
+            if (res.backup && res.backup.meta) {
+                hydrateProgressPanel(res.backup.meta, res.backup.control_state || 'running');
+            }
             startPolling(res.backup_task_id);
         }
     } catch (e) { console.error(e); }
+}
+
+function hydrateProgressPanel(meta, controlState = 'running') {
+    const m = meta || {};
+    document.getElementById('bCurrentSite').textContent = m.current_site || '--';
+    document.getElementById('bFiles').textContent = `${m.files_done || 0} / ${m.files_total || 0}`;
+    document.getElementById('bSpeed').textContent = m.is_paused ? '⏸ Paused' : (m.speed_human || '0 KB/s');
+    document.getElementById('bEta').textContent = m.is_paused ? '--' : (m.eta_human || '--');
+    document.getElementById('bFilesDownloaded').textContent = (m.files_downloaded || 0).toLocaleString();
+    document.getElementById('bFilesSkipped').textContent = (m.files_skipped || 0).toLocaleString();
+    document.getElementById('bFilesResumed').textContent = (m.files_resumed || 0).toLocaleString();
+    document.getElementById('bLiveSize').textContent = formatBytes(m.bytes_done || m.bytes_downloaded || 0);
+    document.getElementById('bCurrentFile').textContent = m.current_file || 'Working...';
+    document.getElementById('bOverallPct').textContent = (m.overall_pct || 0) + '%';
+    document.getElementById('bProgressBar').style.width = (m.overall_pct || 0) + '%';
+
+    if (controlState === 'paused') {
+        document.getElementById('bPauseBtn').style.display = 'none';
+        document.getElementById('bResumeBtn').style.display = 'inline-flex';
+        document.getElementById('progressState').textContent = 'PAUSED';
+        document.getElementById('progressState').className = 'badge-modern badge-warning';
+    } else if (controlState === 'cancelled') {
+        document.getElementById('progressState').textContent = 'CANCELLING...';
+        document.getElementById('progressState').className = 'badge-modern badge-warning';
+    } else {
+        document.getElementById('bPauseBtn').style.display = 'inline-flex';
+        document.getElementById('bResumeBtn').style.display = 'none';
+        document.getElementById('progressState').textContent = 'RUNNING';
+        document.getElementById('progressState').className = 'badge-modern badge-info';
+    }
 }
 
 window.startBackup = async function() {
@@ -184,6 +267,11 @@ window.startBackup = async function() {
             document.getElementById('progressPanel').style.display = 'block';
             document.getElementById('progressPanel').scrollIntoView({ behavior: 'smooth' });
             startPolling(data.task_id);
+            refreshOperationsQueue();
+        } else if (data.status === 'queued') {
+            const pos = data.queue_item && data.queue_item.position ? ` Queue position: ${data.queue_item.position}.` : '';
+            showToast((data.message || 'Backup queued.') + pos, 'info');
+            refreshOperationsQueue();
         }
     } catch(e) {
         showToast('Error: ' + e, 'error');
@@ -198,33 +286,7 @@ function startPolling(taskId) {
             const data = await apiCall(`/api/backup/status/${taskId}`);
 
             if (data.state === 'PROGRESS' && data.meta && !cancelInProgress) {
-                const m = data.meta;
-                document.getElementById('bCurrentSite').textContent = m.current_site || '--';
-                document.getElementById('bFiles').textContent = `${m.files_done || 0} / ${m.files_total || 0}`;
-                document.getElementById('bSpeed').textContent = m.is_paused ? '⏸ Paused' : (m.speed_human || '0 KB/s');
-                document.getElementById('bEta').textContent = m.is_paused ? '--' : (m.eta_human || '--');
-                document.getElementById('bFilesDownloaded').textContent = (m.files_downloaded || 0).toLocaleString();
-                document.getElementById('bFilesSkipped').textContent = (m.files_skipped || 0).toLocaleString();
-                document.getElementById('bFilesResumed').textContent = (m.files_resumed || 0).toLocaleString();
-                document.getElementById('bCurrentFile').textContent = m.current_file || 'Working...';
-                document.getElementById('bOverallPct').textContent = (m.overall_pct || 0) + '%';
-                document.getElementById('bProgressBar').style.width = (m.overall_pct || 0) + '%';
-
-                if (data.control_state === 'paused') {
-                    document.getElementById('bPauseBtn').style.display = 'none';
-                    document.getElementById('bResumeBtn').style.display = 'inline-flex';
-                    document.getElementById('progressState').textContent = 'PAUSED';
-                    document.getElementById('progressState').className = 'badge-modern badge-warning';
-                } else if (data.control_state === 'cancelled') {
-                    // ★ Control flag set to cancelled — show cancelling state ★
-                    document.getElementById('progressState').textContent = 'CANCELLING...';
-                    document.getElementById('progressState').className = 'badge-modern badge-warning';
-                } else {
-                    document.getElementById('bPauseBtn').style.display = 'inline-flex';
-                    document.getElementById('bResumeBtn').style.display = 'none';
-                    document.getElementById('progressState').textContent = 'RUNNING';
-                    document.getElementById('progressState').className = 'badge-modern badge-info';
-                }
+                hydrateProgressPanel(data.meta, data.control_state || 'running');
             }
             else if (data.state === 'SUCCESS') {
                 clearInterval(backupPollInterval);
@@ -319,6 +381,94 @@ async function cancelBackup() {
     }
 }
 
+async function refreshOperationsQueue() {
+    try {
+        const data = await apiCall('/api/tasks/overview');
+        const entries = [];
+        const running = data.running || {};
+        const queued = data.queued || {};
+
+        if (running.backup) {
+            entries.push(renderOperationCard(
+                'Running Backup',
+                'RUNNING',
+                formatOperationMeta(running.backup),
+                'var(--success)'
+            ));
+        }
+        if (running.download) {
+            entries.push(renderOperationCard(
+                'Running Download',
+                'RUNNING',
+                formatOperationMeta(running.download),
+                'var(--accent)'
+            ));
+        }
+        if (running.restore) {
+            entries.push(renderOperationCard(
+                `Running Restore · ${running.restore.workload || 'restore'}`,
+                'RUNNING',
+                `${running.restore.tenant_name || 'Unknown tenant'} · ${running.restore.source_backup || ''}`,
+                'var(--warning)'
+            ));
+        }
+
+        (queued.backup || []).forEach(item => {
+            entries.push(renderOperationCard(item.title || 'Queued Backup', 'QUEUED', item.detail || '', 'var(--primary)', item.id));
+        });
+        (queued.download || []).forEach(item => {
+            entries.push(renderOperationCard(item.title || 'Queued Download', 'QUEUED', item.detail || '', 'var(--accent)', item.id));
+        });
+        (queued.restore || []).forEach(item => {
+            entries.push(renderOperationCard(item.title || 'Queued Restore', 'QUEUED', item.detail || '', 'var(--warning)', item.id));
+        });
+
+        document.getElementById('opsQueueCount').textContent =
+            `${(queued.backup || []).length + (queued.download || []).length + (queued.restore || []).length} queued`;
+        document.getElementById('opsQueueList').innerHTML = entries.length
+            ? entries.join('')
+            : '<div style="color:var(--text-dim);font-size:13px;">No running or queued operations.</div>';
+    } catch (e) {
+        document.getElementById('opsQueueList').innerHTML = `<div style="color:var(--danger);font-size:13px;">Failed to load operations queue: ${escapeHtml(e.message || String(e))}</div>`;
+    }
+}
+
+async function deleteQueueItem(itemId) {
+    if (!confirm('Remove this queued operation?')) return;
+    await apiCall(`/api/queue/${itemId}`, 'DELETE');
+    showToast('Queued operation removed', 'success');
+    refreshOperationsQueue();
+}
+
+function hydrateDashboardSummary(summary) {
+    if (!summary) return;
+    document.getElementById('dashSitesTotal').textContent = summary.sites_total || 0;
+    document.getElementById('dashSitesEnabled').textContent = summary.sites_enabled || 0;
+    document.getElementById('dashBackupsTotal').textContent = summary.backups_total || 0;
+
+    const schedule = summary.schedule || {};
+    document.getElementById('dashCronExpr').textContent = schedule.cron_expression || '0 2 * * *';
+    document.getElementById('dashCronScope').textContent = schedule.scope || 'Schedule';
+    document.getElementById('dashCronOwner').textContent = schedule.owner || 'Active tenant';
+    const statusEl = document.getElementById('dashCronStatus');
+    statusEl.textContent = schedule.enabled ? 'Enabled' : 'Disabled';
+    statusEl.style.color = schedule.enabled ? 'var(--success)' : 'var(--text-dim)';
+    document.getElementById('dashCronTimezone').textContent = schedule.timezone || 'Asia/Jakarta';
+}
+
+async function refreshDashboardSummary() {
+    try {
+        const summary = await apiCall('/api/dashboard/summary');
+        hydrateDashboardSummary(summary);
+    } catch (e) {
+        console.error('Failed to refresh dashboard summary', e);
+    }
+}
+
 window.addEventListener('load', checkActiveTask);
+window.addEventListener('load', refreshOperationsQueue);
+window.addEventListener('load', refreshDashboardSummary);
+setInterval(refreshOperationsQueue, 5000);
+setInterval(refreshDashboardSummary, 30000);
 </script>
 {% endblock %}

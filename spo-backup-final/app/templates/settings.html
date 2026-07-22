@@ -12,11 +12,11 @@
             <div style="flex:1;min-width:260px;">
                 <div style="font-weight:700;font-size:15px;">Legacy Compatibility Settings</div>
                 <div style="color:var(--text-muted);font-size:13px;margin-top:4px;">
-                    Halaman ini masih mempertahankan global schedule dan raw config editor untuk kompatibilitas.
-                    Untuk operasi harian multi-tenant, gunakan <a href="/schedules" style="color:var(--accent);font-weight:600;">Per-Tenant Schedules</a> sebagai flow utama.
+                    This page still keeps the global schedule summary and raw configuration editor for compatibility.
+                    For daily multi-tenant operations, use <a href="/schedules" style="color:var(--accent);font-weight:600;">Per-Tenant Schedules</a> as the primary workflow.
                 </div>
                 <div style="margin-top:10px;font-size:12px;color:var(--warning);font-weight:600;">
-                    Gunakan `Schedules` untuk backup tenant aktif per workload. Gunakan `Legacy Global Schedule` di bawah hanya jika Anda memang masih menjalankan flow lama satu jadwal global untuk semua site.
+                    Use `Schedules` for workload-aware backups on the active tenant. Use `Legacy Global Schedule` below only if you still rely on the older single global schedule for all SharePoint sites.
                 </div>
             </div>
         </div>
@@ -32,7 +32,7 @@
     <div class="card-body">
         <p style="color:var(--text-muted);font-size:13px;margin-bottom:18px;">
             <i class="bi bi-info-circle"></i> 
-            Setelah backup selesai, hasil backup akan otomatis di-upload ke destinasi remote yang dikonfigurasi.
+            After a backup finishes, the result can be uploaded automatically to the configured remote destination.
             Supported: <strong>SMB/CIFS</strong>, <strong>FTP/FTPS</strong>, <strong>SFTP/SSH</strong>, <strong>WebDAV</strong>.
         </p>
 
@@ -61,8 +61,8 @@
         </div>
         <div style="background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.2);border-radius:10px;padding:12px;margin-top:14px;font-size:13px;">
             <i class="bi bi-info-circle" style="color:var(--warning);"></i>
-            Global schedule tidak lagi diedit dari halaman ini agar tidak bentrok dengan flow utama.
-            Untuk konfigurasi harian, buka <a href="/schedules" style="color:var(--accent);font-weight:600;">Per-Tenant Schedules</a>.
+            The global schedule is no longer edited from this page to avoid conflicting with the primary workflow.
+            For day-to-day scheduling, open <a href="/schedules" style="color:var(--accent);font-weight:600;">Per-Tenant Schedules</a>.
         </div>
         <div class="d-flex justify-content-end gap-2 mt-3">
             <a href="/schedules" class="btn-modern btn-primary-modern"><i class="bi bi-clock-history"></i> Open Per-Tenant Schedules</a>
@@ -156,7 +156,7 @@
                         <div class="col-md-6">
                             <label>Password</label>
                             <input type="password" id="destPassword" placeholder="********">
-                            <div class="form-hint" id="destPasswordHint">Masukkan password untuk koneksi remote.</div>
+                            <div class="form-hint" id="destPasswordHint">Enter the password for the remote connection.</div>
                         </div>
                     </div>
 
@@ -187,7 +187,7 @@
                     <div style="margin-bottom:16px;">
                         <label>Remote Path</label>
                         <input type="text" id="destRemotePath" placeholder="/backup/sharepoint">
-                        <div class="form-hint">Path di server tujuan tempat backup disimpan</div>
+                        <div class="form-hint">Path on the destination server where backup data will be stored.</div>
                     </div>
 
                     <div style="background:rgba(99,102,241,0.06);border:1px solid var(--border);border-radius:10px;padding:12px;font-size:13px;">
@@ -218,6 +218,7 @@
 {% block extra_js %}
 <script>
 let currentRemotes = [];
+const remoteTestState = {};
 
 // ═══════════════════════════════════════════════════════════
 // REMOTE DESTINATIONS
@@ -231,7 +232,7 @@ async function loadRemotes() {
 function renderRemotes() {
     const container = document.getElementById('remoteList');
     if (currentRemotes.length === 0) {
-        container.innerHTML = '<div style="padding:30px;text-align:center;color:var(--text-dim);font-size:13px;background:rgba(99,102,241,0.04);border:1px dashed var(--border);border-radius:10px;"><i class="bi bi-cloud-slash" style="font-size:32px;display:block;margin-bottom:8px;opacity:0.5;"></i>No remote destinations configured.<br>Backup hanya disimpan lokal.</div>';
+        container.innerHTML = '<div style="padding:30px;text-align:center;color:var(--text-dim);font-size:13px;background:rgba(99,102,241,0.04);border:1px dashed var(--border);border-radius:10px;"><i class="bi bi-cloud-slash" style="font-size:32px;display:block;margin-bottom:8px;opacity:0.5;"></i>No remote destinations configured.<br>Backups are currently stored locally only.</div>';
         return;
     }
     container.innerHTML = currentRemotes.map((dest, idx) => {
@@ -242,6 +243,7 @@ function renderRemotes() {
         const enabled = dest.enabled !== false;
         const server = dest.config?.server || dest.config?.url || '?';
         const path = dest.config?.remote_path || '/';
+        const state = remoteTestState[dest.name || `idx-${idx}`];
         return `
             <div style="background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:8px;${enabled ? '' : 'opacity:0.5;'}">
                 <div style="display:flex;align-items:center;gap:14px;">
@@ -256,6 +258,9 @@ function renderRemotes() {
                     </div>
                     <span class="badge-modern" style="background:${color}1A;color:${color};">${dest.protocol.toUpperCase()}</span>
                     ${enabled ? '<span class="badge-modern badge-success"><i class="bi bi-check-circle"></i> ON</span>' : '<span class="badge-modern" style="background:rgba(100,116,139,0.15);color:var(--text-dim);">OFF</span>'}
+                    <button class="btn-modern btn-ghost-modern" onclick="testSavedRemote(${idx}, this)" style="padding:6px 10px;" title="Test">
+                        <i class="bi bi-wifi"></i>
+                    </button>
                     <button class="btn-modern btn-ghost-modern" onclick="editRemote(${idx})" style="padding:6px 10px;" title="Edit">
                         <i class="bi bi-pencil"></i>
                     </button>
@@ -263,9 +268,35 @@ function renderRemotes() {
                         <i class="bi bi-trash"></i>
                     </button>
                 </div>
+                ${state ? renderRemoteInlineState(state) : ''}
             </div>
         `;
     }).join('');
+}
+
+function renderRemoteInlineState(state) {
+    const checks = state.checks || {};
+    const ok = state.status === 'ok';
+    const badge = ok
+        ? '<span class="badge-modern badge-success"><i class="bi bi-check-circle-fill"></i> Ready</span>'
+        : '<span class="badge-modern badge-warning"><i class="bi bi-exclamation-triangle-fill"></i> Needs Attention</span>';
+    const checkItems = [
+        ['Connectivity', checks.connectivity],
+        ['Path', checks.path_ready],
+        ['Write', checks.write_access],
+    ].map(([label, value]) => `<span class="badge-modern" style="background:${value ? 'rgba(16,185,129,0.12)' : 'rgba(245,158,11,0.12)'};color:${value ? 'var(--success)' : 'var(--warning)'};">${label}: ${value ? 'OK' : 'Fail'}</span>`).join('');
+    return `
+        <div style="margin-top:12px;padding:12px;border-radius:10px;background:${ok ? 'rgba(16,185,129,0.06)' : 'rgba(245,158,11,0.06)'};border:1px solid ${ok ? 'rgba(16,185,129,0.18)' : 'rgba(245,158,11,0.2)'};">
+            <div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start;flex-wrap:wrap;">
+                <div style="font-size:12px;color:var(--text);line-height:1.6;">
+                    <div style="font-weight:700;">${escapeHtml(state.destination_name || 'Destination test')}</div>
+                    <div>${escapeHtml(state.message || '')}</div>
+                    <div style="color:var(--text-dim);font-family:'JetBrains Mono',monospace;">${escapeHtml(state.remote_path || '/')}</div>
+                </div>
+                ${badge}
+            </div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px;">${checkItems}</div>
+        </div>`;
 }
 
 function showAddRemoteModal() {
@@ -284,7 +315,7 @@ function showAddRemoteModal() {
     document.getElementById('destUseTls').checked = false;
     document.getElementById('destRemotePath').value = '/backup/sharepoint';
     document.getElementById('destEnabled').checked = true;
-    document.getElementById('destPasswordHint').textContent = 'Masukkan password untuk koneksi remote.';
+    document.getElementById('destPasswordHint').textContent = 'Enter the password for the remote connection.';
     document.getElementById('testConnectionResult').innerHTML = '';
     updateProtocolFields();
     new bootstrap.Modal(document.getElementById('remoteModal')).show();
@@ -309,8 +340,8 @@ function editRemote(idx) {
     document.getElementById('destRemotePath').value = c.remote_path || '/backup';
     document.getElementById('destEnabled').checked = dest.enabled !== false;
     document.getElementById('destPasswordHint').textContent = c.password === '***MASKED***'
-        ? 'Biarkan kosong untuk mempertahankan password yang sudah tersimpan.'
-        : 'Masukkan password untuk koneksi remote.';
+        ? 'Leave blank to keep the saved password.'
+        : 'Enter the password for the remote connection.';
     document.getElementById('testConnectionResult').innerHTML = '';
     updateProtocolFields();
     new bootstrap.Modal(document.getElementById('remoteModal')).show();
@@ -397,10 +428,17 @@ async function testRemoteConnection() {
                         testBtn.innerHTML = originalText;
                     }
                     const r = status.result || {};
+                    const checks = r.checks || {};
+                    const checksHtml = `
+                        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px;">
+                            <span class="badge-modern" style="background:${checks.connectivity ? 'rgba(16,185,129,0.12)' : 'rgba(239,68,68,0.12)'};color:${checks.connectivity ? 'var(--success)' : 'var(--danger)'};">Connectivity: ${checks.connectivity ? 'OK' : 'Fail'}</span>
+                            <span class="badge-modern" style="background:${checks.path_ready ? 'rgba(16,185,129,0.12)' : 'rgba(239,68,68,0.12)'};color:${checks.path_ready ? 'var(--success)' : 'var(--danger)'};">Path: ${checks.path_ready ? 'Ready' : 'Fail'}</span>
+                            <span class="badge-modern" style="background:${checks.write_access ? 'rgba(16,185,129,0.12)' : 'rgba(239,68,68,0.12)'};color:${checks.write_access ? 'var(--success)' : 'var(--danger)'};">Write: ${checks.write_access ? 'OK' : 'Fail'}</span>
+                        </div>`;
                     if (r.status === 'ok') {
-                        resultDiv.innerHTML = `<div style="color:var(--success);background:rgba(16,185,129,0.1);border:1px solid rgba(16,185,129,0.3);border-radius:8px;padding:10px;"><i class="bi bi-check-circle-fill"></i> <strong>Connection OK</strong> — ${escapeHtml(r.message || 'Connected')}</div>`;
+                        resultDiv.innerHTML = `<div style="color:var(--success);background:rgba(16,185,129,0.1);border:1px solid rgba(16,185,129,0.3);border-radius:8px;padding:10px;"><i class="bi bi-check-circle-fill"></i> <strong>Connection OK</strong> — ${escapeHtml(r.message || 'Connected')}<div style="margin-top:6px;font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-muted);">${escapeHtml(r.remote_path || '/')}</div>${checksHtml}</div>`;
                     } else {
-                        resultDiv.innerHTML = `<div style="color:var(--danger);background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:10px;"><i class="bi bi-x-circle-fill"></i> <strong>Failed</strong> — ${escapeHtml(r.message || 'Connection failed')}</div>`;
+                        resultDiv.innerHTML = `<div style="color:var(--danger);background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:10px;"><i class="bi bi-x-circle-fill"></i> <strong>Failed</strong> — ${escapeHtml(r.message || 'Connection failed')}<div style="margin-top:6px;font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-muted);">${escapeHtml(r.remote_path || '/')}</div>${checksHtml}</div>`;
                     }
                 }
                 if (status.state === 'FAILURE') {
@@ -433,6 +471,82 @@ async function testRemoteConnection() {
             testBtn.disabled = false;
             testBtn.innerHTML = originalText;
         }
+    }
+}
+
+async function testSavedRemote(idx, btn) {
+    const dest = currentRemotes[idx];
+    if (!dest) return;
+    const key = dest.name || `idx-${idx}`;
+    const original = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="bi bi-arrow-repeat spin"></i>';
+    remoteTestState[key] = {
+        status: 'pending',
+        destination_name: dest.name || 'Unnamed',
+        message: 'Testing destination...',
+        remote_path: (dest.config && dest.config.remote_path) || '/',
+        checks: {},
+    };
+    renderRemotes();
+    try {
+        const res = await apiCall('/api/remote-destinations/test', 'POST', dest);
+        if (!res.task_id) {
+            remoteTestState[key] = {
+                status: 'error',
+                destination_name: dest.name || 'Unnamed',
+                message: res.error || 'Failed to start test',
+                remote_path: (dest.config && dest.config.remote_path) || '/',
+                checks: {connectivity: false, path_ready: false, write_access: false},
+            };
+            renderRemotes();
+            btn.disabled = false;
+            btn.innerHTML = original;
+            return;
+        }
+        let pollCount = 0;
+        const iv = setInterval(async () => {
+            pollCount++;
+            const status = await apiCall(`/api/remote-destinations/test/status/${res.task_id}`);
+            if (status.state === 'SUCCESS') {
+                clearInterval(iv);
+                remoteTestState[key] = status.result || {
+                    status: 'error',
+                    destination_name: dest.name || 'Unnamed',
+                    message: 'Empty test result',
+                    remote_path: (dest.config && dest.config.remote_path) || '/',
+                    checks: {connectivity: false, path_ready: false, write_access: false},
+                };
+                renderRemotes();
+                showToast(`${dest.name}: ${remoteTestState[key].message}`, remoteTestState[key].status === 'ok' ? 'success' : 'warning');
+                btn.disabled = false;
+                btn.innerHTML = original;
+            }
+            if (status.state === 'FAILURE' || pollCount > 30) {
+                clearInterval(iv);
+                remoteTestState[key] = {
+                    status: 'error',
+                    destination_name: dest.name || 'Unnamed',
+                    message: status.error || 'Remote test timed out',
+                    remote_path: (dest.config && dest.config.remote_path) || '/',
+                    checks: {connectivity: false, path_ready: false, write_access: false},
+                };
+                renderRemotes();
+                btn.disabled = false;
+                btn.innerHTML = original;
+            }
+        }, 1000);
+    } catch (e) {
+        remoteTestState[key] = {
+            status: 'error',
+            destination_name: dest.name || 'Unnamed',
+            message: e.message,
+            remote_path: (dest.config && dest.config.remote_path) || '/',
+            checks: {connectivity: false, path_ready: false, write_access: false},
+        };
+        renderRemotes();
+        btn.disabled = false;
+        btn.innerHTML = original;
     }
 }
 

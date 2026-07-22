@@ -5,6 +5,12 @@ from pathlib import Path
 
 import msal
 import requests
+from app.http_utils import (
+    build_retry_session,
+    compute_backoff_delay,
+    is_retryable_exception,
+    is_retryable_status,
+)
 
 log = logging.getLogger("spo_backup")
 
@@ -21,7 +27,7 @@ class BaseRestore:
         self.mode = mode
         self._token = None
         self._token_expires_at = 0
-        self.session = requests.Session()
+        self.session = build_retry_session()
         self.stats = {
             "tenant_id": tenant.get("id"),
             "tenant_name": tenant.get("name"),
@@ -65,20 +71,37 @@ class BaseRestore:
 
     def _request(self, method, url, **kwargs):
         response = None
-        for attempt in range(3):
+        last_error = None
+        for attempt in range(5):
             try:
                 response = self.session.request(method, url, **kwargs)
-                if response.status_code == 429:
-                    time.sleep(int(response.headers.get("Retry-After", 30)))
+                if response.status_code == 401 and attempt < 4:
+                    self._token = None
+                    self._token_expires_at = 0
+                    time.sleep(1)
+                    continue
+                if is_retryable_status(response.status_code) and attempt < 4:
+                    time.sleep(compute_backoff_delay(attempt, response=response))
                     continue
                 response.raise_for_status()
                 return response
-            except requests.HTTPError:
+            except requests.HTTPError as e:
+                last_error = e
                 if response is not None and response.status_code in (400, 404, 409):
                     raise
-                if attempt == 2:
+                if response is not None and is_retryable_status(response.status_code) and attempt < 4:
+                    time.sleep(compute_backoff_delay(attempt, response=response))
+                    continue
+                if attempt == 4:
                     raise
-                time.sleep(2 ** attempt)
+                time.sleep(compute_backoff_delay(attempt, response=response))
+            except Exception as e:
+                last_error = e
+                if not is_retryable_exception(e) or attempt == 4:
+                    raise
+                time.sleep(compute_backoff_delay(attempt, response=response))
+        if last_error:
+            raise last_error
         raise Exception(f"Failed after retries: {method} {url}")
 
     def _get(self, url, params=None):
