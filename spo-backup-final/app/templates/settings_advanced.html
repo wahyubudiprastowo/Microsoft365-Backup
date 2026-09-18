@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+{% block title %}Advanced Compatibility{% endblock %}
+{% block page_title %}<i class="bi bi-code-square" style="color:var(--warning);"></i> Advanced Compatibility{% endblock %}
+{% block content %}
+
+<div class="glass-card mb-4" style="border-color:rgba(245,158,11,0.22);">
+    <div class="card-body">
+        <div style="display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap;">
+            <div style="width:46px;height:46px;border-radius:12px;background:rgba(245,158,11,0.12);display:flex;align-items:center;justify-content:center;color:var(--warning);font-size:22px;">
+                <i class="bi bi-exclamation-triangle"></i>
+            </div>
+            <div style="flex:1;min-width:260px;">
+                <div style="font-weight:700;font-size:15px;">Compatibility And Raw Configuration Surface</div>
+                <div style="color:var(--text-muted);font-size:13px;margin-top:4px;">
+                    This page is intentionally separated from the daily operator settings. Use it only for compatibility maintenance,
+                    low-level config inspection, and legacy troubleshooting.
+                </div>
+                <div style="margin-top:10px;font-size:12px;color:var(--warning);font-weight:600;">
+                    Daily scheduling belongs to <a href="/schedules" style="color:var(--accent);font-weight:700;">Schedules</a>, not here.
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="glass-card mb-4">
+    <div class="card-header">
+        <h6><i class="bi bi-signpost-split" style="color:var(--accent);"></i> Safe Navigation</h6>
+    </div>
+    <div class="card-body">
+        <div class="row g-3">
+            <div class="col-lg-4">
+                <a href="/settings" class="btn-modern btn-primary-modern" style="width:100%;justify-content:center;"><i class="bi bi-arrow-left"></i> Back To Standard Settings</a>
+            </div>
+            <div class="col-lg-4">
+                <a href="/schedules" class="btn-modern btn-ghost-modern" style="width:100%;justify-content:center;"><i class="bi bi-clock-history"></i> Open Schedules</a>
+            </div>
+            <div class="col-lg-4">
+                <a href="/tenants" class="btn-modern btn-ghost-modern" style="width:100%;justify-content:center;"><i class="bi bi-building"></i> Open Tenants</a>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="glass-card mb-4">
+    <div class="card-header">
+        <h6><i class="bi bi-hourglass-split" style="color:var(--warning);"></i> Legacy Global Schedule Summary</h6>
+        <span class="badge-modern" style="background:rgba(245,158,11,0.12);color:var(--warning);">Compatibility Only</span>
+    </div>
+    <div class="card-body">
+        <div style="background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.22);border-radius:10px;padding:14px;font-size:13px;color:var(--text-muted);">
+            <div>Global cron: <code style="color:var(--accent);">{{ config.schedule.cron_expression }}</code></div>
+            <div>Status: <strong style="color:{% if config.schedule.enabled %}var(--success){% else %}var(--text-dim){% endif %};">{% if config.schedule.enabled %}Enabled{% else %}Disabled{% endif %}</strong></div>
+            <div>Timezone: <code style="color:var(--text);">{{ config.schedule.timezone }}</code></div>
+            <div style="margin-top:8px;">This summary exists only to help audit or maintain older single-global behavior. It is not the primary product schedule surface.</div>
+        </div>
+    </div>
+</div>
+
+<div class="glass-card">
+    <div class="card-header">
+        <h6><i class="bi bi-braces-asterisk"></i> Raw Configuration Editor</h6>
+        <div class="d-flex gap-2">
+            <button type="button" class="btn-modern btn-ghost-modern" onclick="loadCfg()" style="padding:6px 14px;font-size:12px;"><i class="bi bi-arrow-clockwise"></i> Reload</button>
+        </div>
+    </div>
+    <div class="card-body">
+        <div style="font-size:13px;color:var(--text-muted);margin-bottom:12px;">
+            Editing raw JSON can override tenant-aware behavior. Use this only when the standard settings, tenants, workloads, or schedules pages do not cover the compatibility case you need.
+        </div>
+        <textarea id="cfgEditor" rows="24" style="width:100%;background:#050810;color:#cbd5e1;border:1px solid var(--border);border-radius:10px;padding:16px;font-family:'JetBrains Mono',monospace;font-size:13px;line-height:1.6;resize:vertical;"></textarea>
+        <div class="d-flex justify-content-end gap-2 mt-3">
+            <a href="/settings" class="btn-modern btn-ghost-modern">Close</a>
+            <button type="button" class="btn-modern btn-primary-modern" onclick="saveCfg()"><i class="bi bi-check-lg"></i> Save All</button>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script>
+async function loadCfg() {
+    try {
+        const c = await apiCall('/api/config');
+        document.getElementById('cfgEditor').value = JSON.stringify(c, null, 4);
+    } catch (e) {
+        showToast('Failed to load config: ' + e.message, 'error');
+    }
+}
+
+async function saveCfg() {
+    try {
+        const cfg = JSON.parse(document.getElementById('cfgEditor').value);
+        const res = await apiCall('/api/config', 'POST', cfg);
+        if (res.status === 'saved') {
+            showToast('Advanced configuration saved', 'success');
+        } else {
+            showToast(res.error || 'Failed', 'error');
+        }
+    } catch (e) {
+        showToast('Invalid JSON: ' + e.message, 'error');
+    }
+}
+
+loadCfg();
+</script>
+{% endblock %}

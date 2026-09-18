@@ -1,0 +1,972 @@
+{% extends "base.html" %}
+{% block title %}Backups{% endblock %}
+{% block page_title %}<i class="bi bi-archive-fill" style="color:var(--accent);"></i> Backup History{% endblock %}
+{% block topbar_actions %}
+<button class="btn-modern btn-primary-modern" onclick="startTenantAwareBackup()">
+    <i class="bi bi-play-fill"></i> Run Active Tenant Backup
+</button>
+{% endblock %}
+
+{% block content %}
+<div class="glass-card mb-4" style="border-color:rgba(16,185,129,0.25);">
+    <div class="card-body" style="display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap;">
+        <div style="width:44px;height:44px;border-radius:12px;background:rgba(16,185,129,0.12);display:flex;align-items:center;justify-content:center;color:var(--success);font-size:22px;">
+            <i class="bi bi-layers-fill"></i>
+        </div>
+        <div style="flex:1;min-width:260px;">
+            <div style="font-weight:700;font-size:15px;">Modern Backup Flow</div>
+            <div style="color:var(--text-muted);font-size:13px;margin-top:4px;">
+                This page is the primary tenant-aware multi-workload backup flow. `legacy` backup entries are still shown for compatibility and audit history.
+            </div>
+            <div style="color:var(--accent);font-size:12px;margin-top:8px;">
+                If another backup is still running, new requests are automatically queued and started after the active task finishes.
+            </div>
+        </div>
+    </div>
+</div>
+<div class="glass-card mb-4" id="backupProgressPanel" style="display:none;">
+    <div class="card-header">
+        <h6><i class="bi bi-arrow-repeat spin" style="color:var(--accent);"></i> Active Backup</h6>
+        <span class="badge-modern badge-info" id="backupProgressState">RUNNING</span>
+    </div>
+    <div class="card-body">
+        <div class="row g-3 mb-3">
+            <div class="col-md-3"><div style="background:rgba(99,102,241,0.06);border:1px solid var(--border);border-radius:10px;padding:12px;">
+                <div id="bpProgressLabel" style="font-size:10px;color:var(--text-muted);font-weight:700;text-transform:uppercase;">Files</div>
+                <div id="bpFiles" style="font-size:18px;font-weight:700;">0 / 0</div>
+                <div id="bpFilesHint" style="font-size:11px;color:var(--text-dim);margin-top:6px;">Remaining: 0 items</div>
+            </div></div>
+            <div class="col-md-3"><div style="background:rgba(16,185,129,0.06);border:1px solid rgba(16,185,129,0.2);border-radius:10px;padding:12px;">
+                <div style="font-size:10px;color:var(--text-muted);font-weight:700;text-transform:uppercase;">Downloaded</div>
+                <div id="bpDownloaded" style="font-size:18px;font-weight:700;">0</div>
+            </div></div>
+            <div class="col-md-3"><div style="background:rgba(100,116,139,0.08);border:1px solid rgba(100,116,139,0.2);border-radius:10px;padding:12px;">
+                <div style="font-size:10px;color:var(--text-muted);font-weight:700;text-transform:uppercase;">Skipped Unchanged</div>
+                <div id="bpSkipped" style="font-size:18px;font-weight:700;">0</div>
+            </div></div>
+            <div class="col-md-3"><div style="background:rgba(6,182,212,0.08);border:1px solid rgba(6,182,212,0.2);border-radius:10px;padding:12px;">
+                <div style="font-size:10px;color:var(--text-muted);font-weight:700;text-transform:uppercase;">Resumed</div>
+                <div id="bpResumed" style="font-size:18px;font-weight:700;">0</div>
+            </div></div>
+        </div>
+        <div style="background:rgba(255,255,255,0.02);border:1px solid var(--border);border-radius:10px;padding:14px;">
+            <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:8px;">
+                <span id="bpCurrentFile" style="color:var(--text-muted);font-family:'JetBrains Mono',monospace;max-width:70%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Preparing...</span>
+                <span id="bpPct" style="color:var(--text);font-weight:600;">0%</span>
+            </div>
+            <div class="progress-modern"><div class="progress-bar-modern" id="bpBar" style="width:0%;"></div></div>
+            <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-dim);margin-top:8px;">
+                <span id="bpSpeed">0 KB/s</span>
+                <span id="bpEta">--</span>
+            </div>
+            <div style="display:flex;justify-content:flex-end;font-size:11px;color:var(--text-dim);margin-top:6px;">
+                <span>Remaining Download: <strong id="bpLiveSize" style="color:var(--accent);">0 B</strong></span>
+            </div>
+            <div id="bpLiveSizeHint" style="display:flex;justify-content:flex-end;font-size:11px;color:var(--text-dim);margin-top:4px;">Stored so far: 0 B</div>
+            <div id="bpSpeedHint" style="font-size:11px;color:var(--text-dim);margin-top:4px;">Processed: 0 items/s</div>
+        </div>
+        <div style="margin-top:14px;padding:10px 14px;background:rgba(99,102,241,0.06);border:1px solid var(--border);border-radius:10px;font-size:12px;color:var(--text-muted);">
+            <i class="bi bi-hash"></i> Task ID: <code id="bpTaskId" style="color:var(--primary);">--</code>
+        </div>
+        <div class="mt-3 d-flex gap-2 justify-content-end">
+            <button class="btn-modern" onclick="pauseBackupTask()" id="bpPauseBtn" style="background:rgba(245,158,11,0.15);color:var(--warning);border:1px solid rgba(245,158,11,0.3);">
+                <i class="bi bi-pause-fill"></i> Pause
+            </button>
+            <button class="btn-modern" onclick="resumeBackupTask()" id="bpResumeBtn" style="display:none;background:rgba(16,185,129,0.15);color:var(--success);border:1px solid rgba(16,185,129,0.3);">
+                <i class="bi bi-play-fill"></i> Resume
+            </button>
+            <button class="btn-modern btn-danger-modern" onclick="cancelBackupTask()" id="bpCancelBtn">
+                <i class="bi bi-x-circle-fill"></i> Cancel
+            </button>
+        </div>
+    </div>
+</div>
+
+<div class="row g-3 mb-4" id="statsRow">
+    <div class="col-md-3">
+        <div class="glass-card">
+            <div class="card-body">
+                <div style="font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:1px;font-weight:700;">Total Backups</div>
+                <div style="font-size:26px;font-weight:800;margin-top:4px;" id="statTotal">--</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="glass-card">
+            <div class="card-body">
+                <div style="font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:1px;font-weight:700;">Total Size</div>
+                <div style="font-size:26px;font-weight:800;margin-top:4px;color:var(--accent);" id="statSize">--</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="glass-card">
+            <div class="card-body">
+                <div style="font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:1px;font-weight:700;">Tenants</div>
+                <div style="font-size:26px;font-weight:800;margin-top:4px;color:var(--primary);" id="statTenants">--</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="glass-card">
+            <div class="card-body">
+                <div style="font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:1px;font-weight:700;">Workloads</div>
+                <div style="font-size:26px;font-weight:800;margin-top:4px;color:var(--warning);" id="statWorkloads">--</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="glass-card mb-4">
+    <div class="card-body" style="padding:14px 20px;">
+        <div class="d-flex align-items-center gap-3 flex-wrap">
+            <span style="font-size:13px;color:var(--text-muted);">Filter:</span>
+            <select id="filterTenant" onchange="applyFilters()" style="background:var(--bg-elevated);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 12px;">
+                <option value="">All Tenants</option>
+            </select>
+            <select id="filterWorkload" onchange="applyFilters()" style="background:var(--bg-elevated);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 12px;">
+                <option value="">All Workloads</option>
+                <option value="sharepoint">SharePoint</option>
+                <option value="onedrive">OneDrive</option>
+                <option value="outlook">Outlook</option>
+                <option value="teams">Teams</option>
+            </select>
+            <select id="filterLayout" onchange="applyFilters()" style="background:var(--bg-elevated);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 12px;">
+                <option value="">All Layouts</option>
+                <option value="legacy">Legacy</option>
+                <option value="tenant-aware">Tenant Aware</option>
+            </select>
+            <button class="btn-modern btn-ghost-modern" onclick="refreshList(true)" style="padding:6px 14px;font-size:12px;">
+                <i class="bi bi-arrow-clockwise"></i> Refresh
+            </button>
+            <button class="btn-modern btn-ghost-modern" onclick="toggleSelectAllVisible()" style="padding:6px 14px;font-size:12px;">
+                <i class="bi bi-check2-square"></i> Select Visible
+            </button>
+            <button class="btn-modern btn-danger-modern" onclick="bulkDeleteSelected()" id="bulkDeleteBtn" style="padding:6px 14px;font-size:12px;display:none;">
+                <i class="bi bi-trash"></i> Delete Selected
+            </button>
+            <span id="selectionSummary" style="font-size:12px;color:var(--text-dim);display:none;">0 selected</span>
+        </div>
+    </div>
+</div>
+
+<div class="glass-card">
+    <div class="card-body" style="padding:0;">
+        <div id="backupsList">
+            <div style="padding:40px;text-align:center;color:var(--text-muted);">
+                <i class="bi bi-arrow-repeat spin" style="font-size:24px;"></i>
+                <div style="margin-top:10px;">Loading backups...</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="backupContentsModal" tabindex="-1">
+    <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content" style="background:var(--bg-elevated);border:1px solid var(--border);border-radius:16px;">
+            <div class="modal-header" style="border-bottom:1px solid var(--border);">
+                <div>
+                    <h5 class="modal-title" id="backupContentsTitle" style="margin-bottom:4px;">Backup Contents</h5>
+                    <div id="backupContentsSubtitle" style="font-size:12px;color:var(--text-dim);"></div>
+                </div>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div style="background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:14px;">
+                    <div style="font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:1px;font-weight:700;margin-bottom:6px;">Directory Path</div>
+                    <div id="backupDirectoryPath" style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text);word-break:break-all;">-</div>
+                </div>
+                <div id="backupContentsBreadcrumbs" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;"></div>
+                <div id="backupContentsBody" style="min-height:120px;color:var(--text-dim);">Loading...</div>
+            </div>
+            <div class="modal-footer" style="border-top:1px solid var(--border);">
+                <button type="button" class="btn-modern btn-ghost-modern" data-bs-dismiss="modal">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+.backup-row {
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+    display: grid;
+    grid-template-columns: 48px 1.05fr 0.8fr 1.7fr 0.7fr 0.75fr 0.7fr 0.8fr 220px;
+    align-items: center;
+    gap: 14px;
+    transition: background 0.2s;
+}
+.backup-row:hover {
+    background: rgba(99,102,241,0.04);
+}
+.backup-row:last-child {
+    border-bottom: none;
+}
+.badge-tenant {
+    display: inline-block;
+    background: linear-gradient(135deg, rgba(99,102,241,0.15), rgba(6,182,212,0.15));
+    color: var(--text);
+    padding: 3px 10px;
+    border-radius: 8px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+}
+.badge-workload {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 8px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+.badge-layout {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 8px;
+    font-size: 11px;
+    font-weight: 600;
+}
+.wl-sharepoint { background: rgba(0,120,212,0.15); color: #4da3e0; }
+.wl-onedrive { background: rgba(59,130,246,0.15); color: #60a5fa; }
+.wl-outlook { background: rgba(14,165,233,0.15); color: #67e8f9; }
+.wl-teams { background: rgba(98,100,167,0.18); color: #b6b7ff; }
+.layout-legacy { background: rgba(245,158,11,0.15); color: #fbbf24; }
+.layout-tenant-aware { background: rgba(16,185,129,0.15); color: #34d399; }
+.recovery-hint {
+    font-size: 10px;
+    margin-top: 6px;
+    line-height: 1.45;
+}
+
+@media (max-width: 1100px) {
+    .backup-row {
+        grid-template-columns: 1fr;
+        gap: 8px;
+    }
+}
+</style>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+let allBackups = [];
+let backupTaskId = null;
+let backupPoll = null;
+let backupPollTick = 0;
+let backupContentsContext = null;
+let backupCancelInProgress = false;
+let visibleBackupKeys = [];
+const selectedBackupKeys = new Set();
+const BACKUPS_PROGRESS_CACHE_KEY = 'm365backup:backups:backup-progress';
+const backupsSpeedSamples = new Map();
+
+function readProgressCache(key) {
+    try {
+        return JSON.parse(sessionStorage.getItem(key) || 'null');
+    } catch (e) {
+        return null;
+    }
+}
+
+function writeProgressCache(key, payload) {
+    try {
+        sessionStorage.setItem(key, JSON.stringify(payload));
+    } catch (e) {
+        console.warn('Failed to persist progress cache', e);
+    }
+}
+
+function clearProgressCache(key) {
+    try {
+        sessionStorage.removeItem(key);
+    } catch (e) {
+        console.warn('Failed to clear progress cache', e);
+    }
+}
+
+function deriveBackupSpeed(meta, taskId, filesPerSecond, isPaused, skippedOnly) {
+    if (isPaused) return 'Paused';
+    if (skippedOnly) return 'No transfer (skipped/reused)';
+
+    const explicitSpeed = String(meta.speed_human || '').trim();
+    if (explicitSpeed && explicitSpeed !== '0 B/s') return explicitSpeed;
+
+    const bytesDone = Number(meta.bytes_done ?? meta.bytes_downloaded ?? 0);
+    const bytesTotal = Number(meta.bytes_total ?? 0);
+    if (bytesDone > 0 || bytesTotal > 0) {
+        const sampleKey = taskId || backupTaskId || 'backups';
+        const now = Date.now();
+        const previous = backupsSpeedSamples.get(sampleKey);
+        backupsSpeedSamples.set(sampleKey, { bytesDone, at: now });
+        if (previous && bytesDone >= previous.bytesDone && now > previous.at) {
+            const deltaBytes = bytesDone - previous.bytesDone;
+            const deltaSeconds = (now - previous.at) / 1000;
+            if (deltaBytes > 0 && deltaSeconds > 0.25) {
+                return `${formatBytes(deltaBytes / deltaSeconds)}/s`;
+            }
+        }
+        return 'Calculating...';
+    }
+
+    return `${formatItemsRate(filesPerSecond)} items/s`;
+}
+
+function restoreBackupProgressFromCache() {
+    const cached = readProgressCache(BACKUPS_PROGRESS_CACHE_KEY);
+    if (!cached || !cached.taskId || !cached.meta) return false;
+    backupTaskId = cached.taskId;
+    document.getElementById('backupProgressPanel').style.display = 'block';
+    document.getElementById('bpTaskId').textContent = cached.taskId.substring(0, 8) + '...';
+    hydrateBackupProgress(cached.meta, cached.controlState || 'running', cached.taskId, false);
+    return true;
+}
+
+async function loadStats() {
+    const stats = await apiCall('/api/v2/backups/stats');
+    document.getElementById('statTotal').textContent = stats.total_backups || 0;
+    document.getElementById('statSize').textContent = stats.total_size_human || '0 B';
+    document.getElementById('statTenants').textContent = Object.keys(stats.by_tenant || {}).length;
+    document.getElementById('statWorkloads').textContent = Object.keys(stats.by_workload || {}).length;
+}
+
+async function refreshList(forceRefresh = false) {
+    try {
+        const suffix = forceRefresh ? '?refresh=1' : '';
+        const res = await apiCall('/api/v2/backups' + suffix);
+        allBackups = res.backups || [];
+
+        const tenants = [...new Set(allBackups.map(item => item.tenant_slug).filter(Boolean))];
+        const tenantFilter = document.getElementById('filterTenant');
+        const currentTenant = tenantFilter.value;
+        tenantFilter.innerHTML = '<option value="">All Tenants</option>' +
+            tenants.map(slug => `<option value="${slug}"${slug === currentTenant ? ' selected' : ''}>${slug}</option>`).join('');
+
+        applyFilters();
+        loadStats().catch(e => console.error('Failed to load backup stats', e));
+    } catch (e) {
+        document.getElementById('backupsList').innerHTML =
+            `<div style="padding:40px;text-align:center;color:var(--danger);">Error: ${e.message}</div>`;
+    }
+}
+
+function applyFilters() {
+    const tenant = document.getElementById('filterTenant').value;
+    const workload = document.getElementById('filterWorkload').value;
+    const layout = document.getElementById('filterLayout').value;
+
+    let filtered = allBackups.slice();
+    if (tenant) filtered = filtered.filter(item => item.tenant_slug === tenant);
+    if (workload) filtered = filtered.filter(item => item.workload === workload);
+    if (layout) filtered = filtered.filter(item => item.layout === layout);
+
+    if (filtered.length === 0) {
+        document.getElementById('backupsList').innerHTML = `
+            <div style="padding:60px;text-align:center;color:var(--text-dim);">
+                <i class="bi bi-inbox" style="font-size:48px;opacity:0.5;display:block;margin-bottom:10px;"></i>
+                No backups found
+            </div>`;
+        return;
+    }
+
+    visibleBackupKeys = [];
+    let html = `<div style="padding:12px 20px;border-bottom:1px solid var(--border);background:rgba(255,255,255,0.02);display:grid;grid-template-columns:48px 1.05fr 0.8fr 1.7fr 0.7fr 0.75fr 0.7fr 0.8fr 220px;gap:14px;font-size:11px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.5px;">
+        <div><input type="checkbox" id="selectAllBackups" onchange="toggleSelectAllVisible(this.checked)" ${filtered.length && filtered.every(item => selectedBackupKeys.has(getBackupKey(item))) ? 'checked' : ''}></div>
+        <div>Tenant</div>
+        <div>Workload</div>
+        <div>Backup</div>
+        <div>Files</div>
+        <div>Size</div>
+        <div>Status</div>
+        <div>Layout</div>
+        <div>Actions</div>
+    </div>`;
+
+    filtered.forEach(item => {
+        const backupKey = getBackupKey(item);
+        visibleBackupKeys.push(backupKey);
+        const workloadClass = `wl-${item.workload || 'sharepoint'}`;
+        const layoutClass = `layout-${item.layout || 'legacy'}`;
+        const status = String(item.status || 'unknown').toLowerCase();
+        const recoveryState = String(item.recovery_state || 'unknown').toLowerCase();
+        const statusMap = {
+            success: { cls: 'badge-success', label: 'success' },
+            running: { cls: 'badge-info', label: 'running' },
+            paused: { cls: 'badge-warning', label: 'paused' },
+            completed: { cls: 'badge-success', label: 'completed' },
+            cancelled: { cls: 'badge-warning', label: 'cancelled' },
+            partial: { cls: 'badge-warning', label: 'partial' },
+            interrupted: { cls: 'badge-warning', label: 'interrupted' },
+            failed: { cls: 'badge-danger', label: 'failed' },
+            unknown: { cls: 'badge-warning', label: 'unknown' },
+        };
+        const recoveryMap = {
+            completed: { cls: 'badge-success', label: item.recovery_label || 'completed' },
+            active: { cls: 'badge-info', label: item.recovery_label || 'active task' },
+            paused: { cls: 'badge-warning', label: item.recovery_label || 'paused' },
+            resume_available: { cls: 'badge-info', label: item.recovery_label || 'resume available' },
+            rerun_recommended: { cls: 'badge-warning', label: item.recovery_label || 'retry recommended' },
+            failed_hard: { cls: 'badge-danger', label: item.recovery_label || 'hard failed' },
+            unknown: { cls: 'badge-warning', label: item.recovery_label || 'unknown state' },
+        };
+        const statusInfo = statusMap[status] || { cls: 'badge-warning', label: status || 'unknown' };
+        const recoveryInfo = recoveryMap[recoveryState] || { cls: 'badge-warning', label: item.recovery_label || 'unknown state' };
+        const summary = item.summary || 'Backup folder';
+        const targetPreview = Array.isArray(item.target_names_preview) && item.target_names_preview.length
+            ? item.target_names_preview.join(', ') + (item.target_names_more ? ` +${item.target_names_more} more` : '')
+            : '';
+        const hasExplicitFileCount = Number.isFinite(Number(item.files_count)) && Number(item.files_count) > 0;
+        const filesPrimary = hasExplicitFileCount
+            ? Number(item.files_count).toLocaleString()
+            : (item.layout === 'legacy' && Number(item.size_bytes || 0) > 0 ? 'metadata n/a' : '0');
+        const filesSecondary = hasExplicitFileCount
+            ? (item.targets_count ? `${item.targets_count} target(s)` : 'Target count n/a')
+            : (item.layout === 'legacy' && Number(item.size_bytes || 0) > 0
+                ? 'legacy flat backup without manifest counts'
+                : (item.targets_count ? `${item.targets_count} target(s)` : 'Target count n/a'));
+        const canResumeAction = !!item.resume_supported && !!item.resume_action_kind;
+        html += `<div class="backup-row">
+            <div>
+                <input type="checkbox" onchange="toggleBackupSelection('${escapeAttr(backupKey)}', this.checked)" ${selectedBackupKeys.has(backupKey) ? 'checked' : ''}>
+            </div>
+            <div>
+                <span class="badge-tenant">${escapeHtml(item.tenant_name || item.tenant_slug || 'Unknown')}</span>
+                <div style="font-size:10px;color:var(--text-dim);margin-top:2px;font-family:'JetBrains Mono',monospace;">${escapeHtml(item.tenant_slug || '-')}</div>
+                ${item.layout === 'legacy' && item.tenant_attribution === 'config-legacy'
+                    ? `<div style="font-size:10px;color:var(--warning);margin-top:4px;">Legacy owner inferred from compatibility tenant</div>`
+                    : ''}
+                ${item.layout === 'legacy' && item.tenant_attribution === 'unknown'
+                    ? `<div style="font-size:10px;color:var(--danger);margin-top:4px;">Legacy owner could not be verified from manifest</div>`
+                    : ''}
+            </div>
+            <div><span class="badge-workload ${workloadClass}">${escapeHtml(item.workload || 'sharepoint')}</span></div>
+            <div>
+                <div style="font-family:'JetBrains Mono',monospace;font-size:12px;">${escapeHtml(item.backup_name)}</div>
+                <div style="font-size:12px;color:var(--text-muted);margin-top:4px;line-height:1.5;">${escapeHtml(summary)}</div>
+                <div style="font-size:10px;color:var(--text-dim);margin-top:4px;font-family:'JetBrains Mono',monospace;word-break:break-all;">${escapeHtml(item.backup_path || '-')}</div>
+                ${targetPreview ? `<div style="font-size:10px;color:var(--text-dim);margin-top:4px;">Contains: ${escapeHtml(targetPreview)}</div>` : ''}
+                ${item.project_hidden_versions_count ? `<div style="font-size:10px;color:var(--accent);margin-top:4px;">Project view is hiding ${item.project_hidden_versions_count} older split run(s)</div>` : ''}
+                ${item.recovery_hint ? `<div class="recovery-hint" style="color:${recoveryState === 'failed_hard' ? 'var(--danger)' : recoveryState === 'completed' ? 'var(--success)' : 'var(--accent)'};">${escapeHtml(item.recovery_hint)}</div>` : ''}
+                <div style="font-size:10px;color:var(--text-dim);margin-top:2px;">${escapeHtml(item.date)}</div>
+            </div>
+            <div style="font-weight:600;">
+                ${escapeHtml(filesPrimary)}
+                <div style="font-size:10px;color:var(--text-dim);margin-top:4px;">
+                    ${escapeHtml(filesSecondary)}
+                </div>
+            </div>
+            <div style="font-weight:600;color:var(--accent);">${escapeHtml(item.size_human || '0 B')}</div>
+            <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-start;">
+                <span class="badge-modern ${statusInfo.cls}">${escapeHtml(statusInfo.label)}</span>
+                <span class="badge-modern ${recoveryInfo.cls}">${escapeHtml(recoveryInfo.label)}</span>
+            </div>
+            <div><span class="badge-layout ${layoutClass}">${escapeHtml(item.layout || 'legacy')}</span></div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;">
+                ${canResumeAction ? `
+                <button class="btn-modern btn-primary-modern" onclick="resumeBackupProject('${escapeAttr(backupKey)}')" style="padding:6px 10px;font-size:11px;" title="${escapeAttr(item.resume_action_label || 'Resume / Re-run')}">
+                    <i class="bi bi-arrow-repeat"></i> ${escapeHtml(item.resume_action_label || 'Resume / Re-run')}
+                </button>` : ''}
+                <button class="btn-modern btn-ghost-modern" onclick="openBackupContents('${encodeURIComponent(item.tenant_slug || '')}','${encodeURIComponent(item.workload || 'sharepoint')}','${encodeURIComponent(item.backup_name)}')" style="padding:6px 10px;font-size:11px;" title="View Contents">
+                    <i class="bi bi-folder2-open"></i> View Contents
+                </button>
+                <button class="btn-modern btn-ghost-modern" onclick="copyBackupPath('${escapeAttr(item.backup_path || '')}')" style="padding:6px 10px;font-size:11px;" title="Copy Local Path">
+                    <i class="bi bi-copy"></i> Copy Path
+                </button>
+                <button class="btn-modern btn-danger-modern" onclick="deleteBackup('${encodeURIComponent(item.tenant_slug || '')}','${encodeURIComponent(item.workload || 'sharepoint')}','${encodeURIComponent(item.backup_name)}')" style="padding:6px 10px;font-size:11px;" title="Delete">
+                    <i class="bi bi-trash"></i>
+                </button>
+            </div>
+        </div>`;
+    });
+
+    document.getElementById('backupsList').innerHTML = html;
+    updateSelectionUI();
+}
+
+async function deleteBackup(tenantSlug, workload, backupName) {
+    const decodedPath = `${decodeURIComponent(tenantSlug)}/${decodeURIComponent(workload)}/${decodeURIComponent(backupName)}`;
+    if (!confirm(`Delete backup?\n\n${decodedPath}`)) return;
+
+    try {
+        const res = await fetch(`/api/v2/backups/${tenantSlug}/${workload}/${backupName}`, {
+            method: 'DELETE'
+        });
+        const data = await res.json();
+        if (data.status === 'deleted') {
+            showToast('Backup deleted', 'success');
+            refreshList(true);
+        } else {
+            showToast(data.error || 'Failed', 'error');
+        }
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+function getBackupKey(item) {
+    return `${item.tenant_slug || ''}::${item.workload || 'sharepoint'}::${item.backup_name || ''}`;
+}
+
+function toggleBackupSelection(key, checked) {
+    if (checked) selectedBackupKeys.add(key);
+    else selectedBackupKeys.delete(key);
+    updateSelectionUI();
+}
+
+function toggleSelectAllVisible(forceState = null) {
+    const shouldSelect = forceState === null
+        ? visibleBackupKeys.some(key => !selectedBackupKeys.has(key))
+        : !!forceState;
+    visibleBackupKeys.forEach(key => {
+        if (shouldSelect) selectedBackupKeys.add(key);
+        else selectedBackupKeys.delete(key);
+    });
+    applyFilters();
+}
+
+function updateSelectionUI() {
+    const count = selectedBackupKeys.size;
+    const summary = document.getElementById('selectionSummary');
+    const bulkDeleteBtn = document.getElementById('bulkDeleteBtn');
+    summary.style.display = count ? 'inline' : 'none';
+    summary.textContent = `${count} selected`;
+    bulkDeleteBtn.style.display = count ? 'inline-flex' : 'none';
+}
+
+async function bulkDeleteSelected() {
+    if (!selectedBackupKeys.size) {
+        showToast('No backups selected', 'warning');
+        return;
+    }
+    const selectedItems = allBackups.filter(item => selectedBackupKeys.has(getBackupKey(item)));
+    if (!selectedItems.length) {
+        showToast('Selected backups are no longer visible', 'warning');
+        selectedBackupKeys.clear();
+        updateSelectionUI();
+        return;
+    }
+    if (!confirm(`Delete ${selectedItems.length} backup item(s)?`)) return;
+
+    let success = 0;
+    let failed = 0;
+    for (const item of selectedItems) {
+        try {
+            const res = await fetch(`/api/v2/backups/${encodeURIComponent(item.tenant_slug || '')}/${encodeURIComponent(item.workload || 'sharepoint')}/${encodeURIComponent(item.backup_name)}`, {
+                method: 'DELETE'
+            });
+            const data = await res.json();
+            if (data.status === 'deleted') {
+                success += 1;
+                selectedBackupKeys.delete(getBackupKey(item));
+            } else {
+                failed += 1;
+            }
+        } catch (e) {
+            failed += 1;
+        }
+    }
+    if (success) showToast(`Deleted ${success} backup(s)`, 'success');
+    if (failed) showToast(`${failed} backup(s) failed to delete`, 'warning');
+    await refreshList(true);
+}
+
+async function copyBackupPath(path) {
+    const decoded = String(path || '');
+    if (!decoded) {
+        showToast('Backup path is empty', 'warning');
+        return;
+    }
+    try {
+        await navigator.clipboard.writeText(decoded);
+        showToast('Backup path copied', 'success');
+    } catch (e) {
+        showToast('Failed to copy path: ' + e.message, 'error');
+    }
+}
+
+function findBackupByKey(key) {
+    return (allBackups || []).find(item => getBackupKey(item) === key) || null;
+}
+
+async function resumeBackupProject(key) {
+    const item = findBackupByKey(key);
+    if (!item) {
+        showToast('Backup item no longer exists in the current list', 'warning');
+        return;
+    }
+    const actionKind = String(item.resume_action_kind || '');
+    if (!actionKind) {
+        showToast('This backup does not expose a resumable action', 'warning');
+        return;
+    }
+
+    const workloadName = String(item.workload || 'sharepoint');
+    const tenantName = String(item.tenant_name || item.tenant_slug || 'tenant');
+    const backupName = String(item.backup_name || 'backup project');
+    const hint = String(item.recovery_hint || '');
+    const confirmMessage = [
+        `${item.resume_action_label || 'Resume / Re-run'}?`,
+        '',
+        `Project: ${backupName}`,
+        `Tenant: ${tenantName}`,
+        `Workload: ${workloadName}`,
+        '',
+        hint,
+    ].join('\n');
+    if (!confirm(confirmMessage)) return;
+
+    try {
+        let res = null;
+        if (actionKind === 'legacy') {
+            res = await apiCall('/api/backup/start', 'POST', {});
+        } else if (actionKind === 'tenant-workload') {
+            if (!item.tenant_id) {
+                throw new Error('Missing tenant_id for workload resume');
+            }
+            res = await apiCall('/api/v2/backup/start', 'POST', {
+                tenant_id: item.tenant_id,
+                workloads: [workloadName],
+            });
+        } else {
+            throw new Error(`Unsupported resume action: ${actionKind}`);
+        }
+
+        if (res.status === 'started') {
+            backupTaskId = res.task_id;
+            showToast(`${item.resume_action_label || 'Backup re-run'} started`, 'success');
+            document.getElementById('backupProgressPanel').style.display = 'block';
+            pollBackupStatus(res.task_id);
+            setTimeout(() => refreshList(true), 1200);
+            return;
+        }
+
+        if (res.status === 'queued') {
+            const pos = res.queue_item && res.queue_item.position ? ` Queue position: ${res.queue_item.position}.` : '';
+            showToast((res.message || 'Backup has been queued.') + pos, 'info');
+            setTimeout(() => refreshList(true), 600);
+            return;
+        }
+
+        showToast(res.error || 'Failed to start the requested backup flow', 'error');
+    } catch (e) {
+        showToast('Resume failed: ' + e.message, 'error');
+    }
+}
+
+function formatEntrySize(entry) {
+    if (entry.type === 'directory') {
+        if (typeof entry.children_count === 'number') {
+            return `${entry.children_count} item(s)`;
+        }
+        return 'directory';
+    }
+    return entry.size_human || '0 B';
+}
+
+function renderBackupBreadcrumbs(currentPath) {
+    const wrap = document.getElementById('backupContentsBreadcrumbs');
+    if (!wrap || !backupContentsContext) return;
+    const bits = currentPath ? currentPath.split('/').filter(Boolean) : [];
+    const parts = [{ label: 'root', path: '' }];
+    let running = '';
+    bits.forEach(bit => {
+        running = running ? `${running}/${bit}` : bit;
+        parts.push({ label: bit, path: running });
+    });
+    wrap.innerHTML = parts.map((part, index) => {
+        const isLast = index === parts.length - 1;
+        return `<button class="btn-modern ${isLast ? 'btn-primary-modern' : 'btn-ghost-modern'}" onclick="openBackupContentsPath('${escapeAttr(backupContentsContext.tenantSlug)}','${escapeAttr(backupContentsContext.workload)}','${escapeAttr(backupContentsContext.backupName)}','${escapeAttr(part.path)}')" style="padding:5px 10px;font-size:11px;">${escapeHtml(part.label)}</button>`;
+    }).join('');
+}
+
+function renderBackupContents(payload) {
+    const backup = payload.backup || {};
+    document.getElementById('backupContentsTitle').textContent = backup.backup_name || 'Backup Contents';
+    document.getElementById('backupContentsSubtitle').textContent = backup.summary || `${backup.workload || 'backup'} • ${backup.date || ''}`;
+    document.getElementById('backupDirectoryPath').textContent = payload.current_path
+        ? `${payload.backup_root}/${payload.current_path}`
+        : payload.backup_root || '-';
+    renderBackupBreadcrumbs(payload.current_path || '');
+
+    const entries = payload.entries || [];
+    if (!entries.length) {
+        document.getElementById('backupContentsBody').innerHTML = '<div style="color:var(--text-dim);">Directory is empty.</div>';
+        return;
+    }
+
+    document.getElementById('backupContentsBody').innerHTML = `
+        <table class="table-modern">
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th style="width:120px;">Type</th>
+                    <th style="width:140px;">Size</th>
+                    <th style="width:180px;">Modified</th>
+                    <th style="width:120px;text-align:right;">Action</th>
+                </tr>
+            </thead>
+            <tbody>
+                ${entries.map(entry => `
+                    <tr>
+                        <td>
+                            <div style="display:flex;align-items:center;gap:10px;">
+                                <i class="bi ${entry.type === 'directory' ? 'bi-folder-fill' : 'bi-file-earmark-text'}" style="color:${entry.type === 'directory' ? 'var(--warning)' : 'var(--accent)'};"></i>
+                                <div>
+                                    <div style="font-weight:600;">${escapeHtml(entry.name)}</div>
+                                    <div style="font-size:10px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;">${escapeHtml(entry.relative_path || '')}</div>
+                                </div>
+                            </div>
+                        </td>
+                        <td><span class="badge-modern ${entry.type === 'directory' ? 'badge-warning' : 'badge-info'}">${escapeHtml(entry.type)}</span></td>
+                        <td>${escapeHtml(formatEntrySize(entry))}</td>
+                        <td>${escapeHtml(entry.modified || '-')}</td>
+                        <td style="text-align:right;">
+                            ${entry.type === 'directory'
+                                ? `<button class="btn-modern btn-ghost-modern" onclick="openBackupContentsPath('${escapeAttr(backupContentsContext.tenantSlug)}','${escapeAttr(backupContentsContext.workload)}','${escapeAttr(backupContentsContext.backupName)}','${escapeAttr(entry.relative_path)}')" style="padding:5px 10px;font-size:11px;">Open</button>`
+                                : '<span style="font-size:11px;color:var(--text-dim);">file</span>'}
+                        </td>
+                    </tr>
+                `).join('')}
+            </tbody>
+        </table>`;
+}
+
+async function openBackupContents(tenantSlug, workload, backupName) {
+    const decoded = {
+        tenantSlug: decodeURIComponent(tenantSlug),
+        workload: decodeURIComponent(workload),
+        backupName: decodeURIComponent(backupName),
+    };
+    backupContentsContext = decoded;
+    document.getElementById('backupContentsTitle').textContent = decoded.backupName;
+    document.getElementById('backupContentsSubtitle').textContent = 'Loading backup contents...';
+    document.getElementById('backupDirectoryPath').textContent = '-';
+    document.getElementById('backupContentsBreadcrumbs').innerHTML = '';
+    document.getElementById('backupContentsBody').innerHTML = '<div style="color:var(--text-dim);">Loading...</div>';
+    new bootstrap.Modal(document.getElementById('backupContentsModal')).show();
+    await openBackupContentsPath(decoded.tenantSlug, decoded.workload, decoded.backupName, '');
+}
+
+async function openBackupContentsPath(tenantSlug, workload, backupName, relativePath = '') {
+    backupContentsContext = { tenantSlug, workload, backupName };
+    const url = `/api/v2/backups/${encodeURIComponent(tenantSlug)}/${encodeURIComponent(workload)}/${encodeURIComponent(backupName)}/contents?path=${encodeURIComponent(relativePath || '')}`;
+    try {
+        const payload = await apiCall(url);
+        if (payload.error) {
+            showToast(payload.error, 'error');
+            document.getElementById('backupContentsBody').innerHTML = `<div style="color:var(--danger);">${escapeHtml(payload.error)}</div>`;
+            return;
+        }
+        renderBackupContents(payload);
+    } catch (e) {
+        showToast('Failed to load backup contents: ' + e.message, 'error');
+        document.getElementById('backupContentsBody').innerHTML = `<div style="color:var(--danger);">${escapeHtml(e.message)}</div>`;
+    }
+}
+
+async function startTenantAwareBackup() {
+    if (!confirm('Start backup for active tenant using tenant-aware layout?')) return;
+    try {
+        const res = await apiCall('/api/v2/backup/start', 'POST', {});
+        if (res.status === 'started') {
+            backupTaskId = res.task_id;
+            showToast(`Backup started (${res.task_id.substring(0, 8)})`, 'success');
+            document.getElementById('backupProgressPanel').style.display = 'block';
+            pollBackupStatus(res.task_id);
+            if (res.warnings && res.warnings.length) {
+                res.warnings.forEach(msg => showToast(msg, 'warning'));
+            }
+            setTimeout(() => refreshList(true), 1500);
+        } else if (res.status === 'queued') {
+            const pos = res.queue_item && res.queue_item.position ? ` Queue position: ${res.queue_item.position}.` : '';
+            showToast((res.message || 'Backup queued.') + pos, 'info');
+            setTimeout(() => refreshList(true), 600);
+        } else {
+            showToast(res.error || 'Failed', 'error');
+        }
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+async function checkActiveBackupTask() {
+    const res = await apiCall('/api/task/active');
+    if (res.backup_task_id) {
+        backupTaskId = res.backup_task_id;
+        document.getElementById('backupProgressPanel').style.display = 'block';
+        document.getElementById('bpTaskId').textContent = res.backup_task_id.substring(0, 8) + '...';
+        if (res.backup && res.backup.meta) {
+            hydrateBackupProgress({
+                ...(res.backup.meta || {}),
+                live_size_bytes: res.backup.live_size_bytes || 0,
+                live_size_human: res.backup.live_size_human || '0 B',
+            }, res.backup.control_state || 'running', res.backup_task_id);
+        }
+        pollBackupStatus(res.backup_task_id);
+    } else {
+        backupTaskId = null;
+        clearProgressCache(BACKUPS_PROGRESS_CACHE_KEY);
+        document.getElementById('backupProgressPanel').style.display = 'none';
+    }
+}
+
+function hydrateBackupProgress(meta, controlState = 'running', taskId = backupTaskId, persist = true) {
+    const m = meta || {};
+    const isPaused = controlState === 'paused' || !!m.is_paused;
+    const progressLabel = m.progress_label || 'Files';
+    const progressDone = Number(m.progress_done ?? m.files_done ?? 0);
+    const progressTotal = Number(m.progress_total ?? m.files_total ?? 0);
+    const pct = Number(m.overall_pct || 0);
+    const skippedOnly = !isPaused && Number(m.files_skipped || 0) > 0 && Number(m.files_downloaded || 0) === 0 && Number(m.files_resumed || 0) === 0;
+    const elapsed = Number(m.elapsed || 0);
+    const bytesDone = Number(m.bytes_done ?? m.bytes_downloaded ?? 0);
+    const bytesTotal = Number(m.bytes_total ?? 0);
+    const liveSizeBytes = Number(m.live_size_bytes || 0);
+    const remainingFiles = Math.max(progressTotal - progressDone, 0);
+    const remainingBytes = Math.max(bytesTotal - bytesDone, 0);
+    const filesPerSecond = elapsed > 0 ? (progressDone / elapsed) : 0;
+    const currentFile = m.current_file || m.file || m.current_site || m.target_name || (pct >= 100 ? 'Finalizing backup metadata...' : 'Working...');
+    const speedText = deriveBackupSpeed(m, taskId, filesPerSecond, isPaused, skippedOnly);
+    document.getElementById('bpProgressLabel').textContent = progressLabel;
+    document.getElementById('bpFiles').textContent = `${progressDone.toLocaleString()} / ${progressTotal.toLocaleString()}`;
+    document.getElementById('bpFilesHint').textContent = `Remaining: ${remainingFiles.toLocaleString()} item${remainingFiles === 1 ? '' : 's'}`;
+    document.getElementById('bpDownloaded').textContent = (m.files_downloaded || 0).toLocaleString();
+    document.getElementById('bpSkipped').textContent = (m.files_skipped || 0).toLocaleString();
+    document.getElementById('bpResumed').textContent = (m.files_resumed || 0).toLocaleString();
+    document.getElementById('bpCurrentFile').textContent = currentFile;
+    document.getElementById('bpPct').textContent = `${pct}%`;
+    document.getElementById('bpBar').style.width = `${pct}%`;
+    document.getElementById('bpSpeed').textContent = speedText;
+    document.getElementById('bpSpeedHint').textContent = isPaused
+        ? 'Processing paused'
+        : (skippedOnly
+            ? 'Transfer skipped because files were already unchanged'
+            : `Processed: ${formatItemsRate(filesPerSecond)} items/s`);
+    document.getElementById('bpEta').textContent = isPaused ? '--' : ((pct >= 100 && !m.end_time) ? 'finalizing...' : (m.eta_human || '--'));
+    document.getElementById('bpLiveSize').textContent = formatBytes(remainingBytes);
+    document.getElementById('bpLiveSizeHint').textContent = `Stored so far: ${m.live_size_human || formatBytes(liveSizeBytes || bytesDone)}`;
+    const stateEl = document.getElementById('backupProgressState');
+    if (controlState === 'paused') {
+        document.getElementById('bpPauseBtn').style.display = 'none';
+        document.getElementById('bpResumeBtn').style.display = 'inline-flex';
+        stateEl.textContent = 'PAUSED';
+        stateEl.className = 'badge-modern badge-warning';
+    } else if (controlState === 'cancelled') {
+        document.getElementById('bpPauseBtn').style.display = 'none';
+        document.getElementById('bpResumeBtn').style.display = 'none';
+        stateEl.textContent = 'CANCELLING...';
+        stateEl.className = 'badge-modern badge-warning';
+    } else {
+        document.getElementById('bpPauseBtn').style.display = 'inline-flex';
+        document.getElementById('bpResumeBtn').style.display = 'none';
+        stateEl.textContent = 'RUNNING';
+        stateEl.className = 'badge-modern badge-info';
+    }
+
+    if (persist) {
+        writeProgressCache(BACKUPS_PROGRESS_CACHE_KEY, {
+            taskId: taskId || backupTaskId,
+            controlState,
+            meta: m,
+            savedAt: Date.now(),
+        });
+    }
+}
+
+function formatItemsRate(value) {
+    const rate = Number(value || 0);
+    if (!Number.isFinite(rate) || rate <= 0) return '0';
+    if (rate >= 100) return rate.toFixed(0);
+    if (rate >= 10) return rate.toFixed(1);
+    return rate.toFixed(2);
+}
+
+function pollBackupStatus(taskId) {
+    if (backupPoll) clearInterval(backupPoll);
+    backupPoll = setInterval(async () => {
+        try {
+            const data = await apiCall(`/api/backup/status/${taskId}`);
+            hydrateBackupProgress({
+                ...(data.meta || {}),
+                live_size_bytes: data.live_size_bytes || 0,
+                live_size_human: data.live_size_human || '0 B',
+            }, data.control_state || 'running', taskId);
+            backupPollTick += 1;
+            if (backupPollTick % 10 === 0) {
+                loadStats();
+            }
+
+            if (data.state === 'SUCCESS' || data.state === 'BACKUP_FAILED' || data.state === 'FAILURE' || data.state === 'REVOKED' || data.state === 'UNKNOWN') {
+                clearInterval(backupPoll);
+                clearProgressCache(BACKUPS_PROGRESS_CACHE_KEY);
+                const cancelled = data.state === 'REVOKED' || data.control_state === 'cancelled';
+                const failed = data.state === 'BACKUP_FAILED' || data.state === 'FAILURE' || data.state === 'UNKNOWN';
+                const stateEl = document.getElementById('backupProgressState');
+                stateEl.textContent = cancelled ? 'CANCELLED' : failed ? 'FAILED' : 'COMPLETED';
+                stateEl.className = cancelled ? 'badge-modern badge-warning' : failed ? 'badge-modern badge-danger' : 'badge-modern badge-success';
+                backupCancelInProgress = false;
+                document.getElementById('bpCancelBtn').disabled = false;
+                document.getElementById('bpCancelBtn').innerHTML = '<i class="bi bi-x-circle-fill"></i> Cancel';
+                refreshList(true);
+                loadStats().catch(e => console.error('Failed to refresh backup stats', e));
+            }
+        } catch (e) {
+            console.error('Backup status polling failed', e);
+        }
+    }, 1000);
+}
+
+async function pauseBackupTask() {
+    if (!backupTaskId) return;
+    await apiCall(`/api/task/${backupTaskId}/pause`, 'POST');
+    document.getElementById('bpPauseBtn').style.display = 'none';
+    document.getElementById('bpResumeBtn').style.display = 'inline-flex';
+    document.getElementById('backupProgressState').textContent = 'PAUSED';
+    document.getElementById('backupProgressState').className = 'badge-modern badge-warning';
+    showToast('Backup paused', 'warning');
+}
+
+async function resumeBackupTask() {
+    if (!backupTaskId) return;
+    await apiCall(`/api/task/${backupTaskId}/resume`, 'POST');
+    showToast('Backup resumed', 'success');
+}
+
+async function cancelBackupTask() {
+    if (!backupTaskId) return;
+    if (!confirm('Cancel active backup? Progress already downloaded will remain on disk.')) return;
+    backupCancelInProgress = true;
+    document.getElementById('bpCancelBtn').disabled = true;
+    document.getElementById('bpCancelBtn').innerHTML = '<i class="bi bi-arrow-repeat spin"></i> Cancelling...';
+    try {
+        await apiCall(`/api/task/${backupTaskId}/cancel`, 'POST');
+        showToast('Cancel requested. The worker will stop shortly.', 'info');
+    } catch (e) {
+        backupCancelInProgress = false;
+        document.getElementById('bpCancelBtn').disabled = false;
+        document.getElementById('bpCancelBtn').innerHTML = '<i class="bi bi-x-circle-fill"></i> Cancel';
+        showToast('Cancel failed: ' + e.message, 'error');
+    }
+}
+
+function escapeHtml(value) {
+    return String(value)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+}
+
+restoreBackupProgressFromCache();
+refreshList(true);
+checkActiveBackupTask().catch(e => console.error('Active backup check failed', e));
+setInterval(() => {
+    if (!backupTaskId && !backupPoll) {
+        checkActiveBackupTask().catch(e => console.error('Active backup refresh failed', e));
+    }
+}, 5000);
+setInterval(() => loadStats().catch(e => console.error('Stats refresh failed', e)), 30000);
+</script>
+{% endblock %}

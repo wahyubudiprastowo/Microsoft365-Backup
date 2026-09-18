@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Backups{% endblock %}
+{% block page_title %}<i class="bi bi-archive-fill" style="color:var(--accent);"></i> Backup History{% endblock %}
+{% block content %}
+<div class="glass-card"><div class="card-header"><h6><i class="bi bi-folder2-open"></i> All Backups ({{ backups|length }})</h6>
+<button class="btn-modern btn-primary-modern" onclick="startBackup()" style="padding:8px 16px;font-size:13px;"><i class="bi bi-play-fill"></i> New Backup</button></div>
+<div class="card-body p-0"><table class="table-modern">
+    <thead><tr><th>Name</th><th>Type</th><th>Date</th><th>Sites</th><th>Size</th><th>Action</th></tr></thead>
+    <tbody>{% for b in backups %}<tr>
+        <td><i class="bi bi-folder-fill" style="color:{% if b.type == 'custom' %}var(--accent){% else %}var(--primary){% endif %};margin-right:6px;"></i><strong>{{ b.name }}</strong></td>
+        <td>{% if b.type == 'custom' %}<span class="badge-modern badge-info">Custom URL</span>{% else %}<span class="badge-modern badge-primary">Scheduled</span>{% endif %}</td>
+        <td>{{ b.date }}</td><td><span class="badge-modern badge-primary">{{ b.site_count }}</span></td><td>{{ b.size_human }}</td>
+        <td><button class="btn-modern btn-danger-modern" style="padding:6px 12px;" onclick="del('{{ b.name }}')"><i class="bi bi-trash"></i></button></td>
+    </tr>{% else %}<tr><td colspan="6" style="text-align:center;color:var(--text-dim);padding:40px;">
+        <i class="bi bi-inbox" style="font-size:48px;display:block;margin-bottom:12px;opacity:0.5;"></i>No backups yet
+    </td></tr>{% endfor %}</tbody>
+</table></div></div>
+{% endblock %}
+
+{% block extra_js %}<script>
+async function del(name) {
+    if (!confirm(`Delete "${name}"?`)) return;
+    await apiCall(`/api/backups/${name}`, 'DELETE');
+    showToast('Deleted', 'success'); setTimeout(() => location.reload(), 500);
+}
+</script>{% endblock %}

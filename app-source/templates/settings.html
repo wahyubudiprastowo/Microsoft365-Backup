@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Settings{% endblock %}
+{% block page_title %}<i class="bi bi-gear-fill" style="color:var(--primary);"></i> Settings{% endblock %}
+{% block content %}
+<div class="glass-card mb-4"><div class="card-header"><h6><i class="bi bi-code-slash"></i> Raw Configuration (JSON)</h6>
+<button class="btn-modern btn-ghost-modern" onclick="loadCfg()" style="padding:6px 14px;font-size:12px;"><i class="bi bi-arrow-clockwise"></i> Reload</button></div>
+<div class="card-body">
+    <p style="color:var(--text-muted);font-size:13px;margin-bottom:14px;">Edit configuration JSON: Azure AD, sites, schedule, notifications (Email, Telegram, Teams).</p>
+    <textarea id="cfgEditor" rows="30" style="width:100%;background:#050810;color:#cbd5e1;border:1px solid var(--border);border-radius:10px;padding:16px;font-family:'JetBrains Mono',monospace;font-size:13px;line-height:1.6;resize:vertical;"></textarea>
+    <div class="d-flex justify-content-end gap-2 mt-3">
+        <button class="btn-modern btn-ghost-modern" onclick="loadCfg()">Cancel</button>
+        <button class="btn-modern btn-primary-modern" onclick="saveCfg()"><i class="bi bi-check-lg"></i> Save</button>
+    </div>
+</div></div>
+
+<div class="glass-card"><div class="card-header"><h6><i class="bi bi-broadcast"></i> Test Notifications</h6></div>
+<div class="card-body">
+    <div class="d-flex gap-2">
+        <button class="btn-modern btn-ghost-modern" onclick="testNotif('email')"><i class="bi bi-envelope"></i> Test Email</button>
+        <button class="btn-modern btn-ghost-modern" onclick="testNotif('telegram')"><i class="bi bi-telegram"></i> Test Telegram</button>
+        <button class="btn-modern btn-ghost-modern" onclick="testNotif('teams')"><i class="bi bi-microsoft-teams"></i> Test Teams</button>
+        <button class="btn-modern btn-primary-modern" onclick="testNotif()"><i class="bi bi-send"></i> Test All</button>
+    </div>
+    <div id="testResult" class="mt-3" style="font-size:13px;color:var(--text-muted);"></div>
+</div></div>
+{% endblock %}
+
+{% block extra_js %}<script>
+async function loadCfg() {
+    const c = await apiCall('/api/config');
+    document.getElementById('cfgEditor').value = JSON.stringify(c, null, 4);
+}
+async function saveCfg() {
+    try {
+        const cfg = JSON.parse(document.getElementById('cfgEditor').value);
+        const res = await apiCall('/api/config', 'POST', cfg);
+        if (res.status === 'saved') showToast('Settings saved!', 'success');
+        else showToast(res.error || 'Failed', 'error');
+    } catch(e) { showToast('Invalid JSON: ' + e.message, 'error'); }
+}
+async function testNotif(channel) {
+    const res = await apiCall('/api/notification/test', 'POST', { channel });
+    document.getElementById('testResult').textContent = 'Sending... ' + res.task_id;
+    showToast(`Test sent (${channel || 'all'})`, 'info');
+}
+loadCfg();
+</script>{% endblock %}

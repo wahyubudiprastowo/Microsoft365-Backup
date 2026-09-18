@@ -1,0 +1,123 @@
+# =============================================================================
+# Microsoft 365 Backup — Portable Deployment
+# Works from any clone location using relative paths or .env overrides
+# =============================================================================
+
+services:
+  spo-backup:
+    build: .
+    image: spo-backup:v4
+    container_name: spo-backup-web
+    restart: unless-stopped
+    user: "${SPO_UID:-1000}:${SPO_GID:-1000}"
+    ports:
+      - "${SPO_WEB_PORT:-5050}:5000"
+    volumes:
+      - ${SPO_DATA_DIR:-../data}:/backup/sharepoint
+      - ${SPO_CONFIG_FILE:-../config/config.json}:/app/config.json
+      - ${SPO_LOG_DIR:-../logs}:/app/logs
+    environment:
+      - SECRET_KEY=${SECRET_KEY:-digiserve-spo-backup-2026}
+      - TZ=${TZ:-Asia/Jakarta}
+      - CONFIG_PATH=/app/config.json
+      - GRAPH_DOWNLOAD_CHUNK_SIZE=${GRAPH_DOWNLOAD_CHUNK_SIZE:-4194304}
+      - GRAPH_LIST_PAGE_SIZE=${GRAPH_LIST_PAGE_SIZE:-999}
+      - BACKUP_MANIFEST_FLUSH_EVERY=${BACKUP_MANIFEST_FLUSH_EVERY:-25}
+      - BACKUP_MANIFEST_FLUSH_INTERVAL=${BACKUP_MANIFEST_FLUSH_INTERVAL:-5}
+      - HTTP_POOL_CONNECTIONS=${HTTP_POOL_CONNECTIONS:-64}
+      - HTTP_POOL_MAXSIZE=${HTTP_POOL_MAXSIZE:-64}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS --max-time 5 http://127.0.0.1:5000/api/health >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 45s
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks: [backup-net]
+
+  redis:
+    image: redis:7-alpine
+    container_name: spo-backup-redis
+    restart: unless-stopped
+    volumes:
+      - ${SPO_REDIS_DIR:-../redis}:/data
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks: [backup-net]
+
+  celery-worker:
+    image: spo-backup:v4
+    container_name: spo-backup-worker
+    restart: unless-stopped
+    user: "${SPO_UID:-1000}:${SPO_GID:-1000}"
+    command: celery -A app.tasks worker --loglevel=info --concurrency=2
+    volumes:
+      - ${SPO_DATA_DIR:-../data}:/backup/sharepoint
+      - ${SPO_CONFIG_FILE:-../config/config.json}:/app/config.json
+      - ${SPO_LOG_DIR:-../logs}:/app/logs
+    environment:
+      - TZ=${TZ:-Asia/Jakarta}
+      - CONFIG_PATH=/app/config.json
+      - GRAPH_DOWNLOAD_CHUNK_SIZE=${GRAPH_DOWNLOAD_CHUNK_SIZE:-4194304}
+      - GRAPH_LIST_PAGE_SIZE=${GRAPH_LIST_PAGE_SIZE:-999}
+      - BACKUP_MANIFEST_FLUSH_EVERY=${BACKUP_MANIFEST_FLUSH_EVERY:-25}
+      - BACKUP_MANIFEST_FLUSH_INTERVAL=${BACKUP_MANIFEST_FLUSH_INTERVAL:-5}
+      - HTTP_POOL_CONNECTIONS=${HTTP_POOL_CONNECTIONS:-64}
+      - HTTP_POOL_MAXSIZE=${HTTP_POOL_MAXSIZE:-64}
+    depends_on: [redis, spo-backup]
+    networks: [backup-net]
+
+  celery-restore-worker:
+    image: spo-backup:v4
+    container_name: spo-backup-restore-worker
+    restart: unless-stopped
+    user: "${SPO_UID:-1000}:${SPO_GID:-1000}"
+    command: celery -A app.tasks worker --loglevel=info --concurrency=1 -Q restore
+    volumes:
+      - ${SPO_DATA_DIR:-../data}:/backup/sharepoint
+      - ${SPO_CONFIG_FILE:-../config/config.json}:/app/config.json
+      - ${SPO_LOG_DIR:-../logs}:/app/logs
+    environment:
+      - TZ=${TZ:-Asia/Jakarta}
+      - CONFIG_PATH=/app/config.json
+      - GRAPH_DOWNLOAD_CHUNK_SIZE=${GRAPH_DOWNLOAD_CHUNK_SIZE:-4194304}
+      - GRAPH_LIST_PAGE_SIZE=${GRAPH_LIST_PAGE_SIZE:-999}
+      - BACKUP_MANIFEST_FLUSH_EVERY=${BACKUP_MANIFEST_FLUSH_EVERY:-25}
+      - BACKUP_MANIFEST_FLUSH_INTERVAL=${BACKUP_MANIFEST_FLUSH_INTERVAL:-5}
+      - HTTP_POOL_CONNECTIONS=${HTTP_POOL_CONNECTIONS:-64}
+      - HTTP_POOL_MAXSIZE=${HTTP_POOL_MAXSIZE:-64}
+    depends_on: [redis, spo-backup]
+    networks: [backup-net]
+
+  celery-beat:
+    image: spo-backup:v4
+    container_name: spo-backup-scheduler
+    restart: unless-stopped
+    user: "${SPO_UID:-1000}:${SPO_GID:-1000}"
+    command: celery -A app.tasks beat --loglevel=info --schedule=/app/celerybeat-schedule
+    volumes:
+      - ${SPO_DATA_DIR:-../data}:/backup/sharepoint
+      - ${SPO_CONFIG_FILE:-../config/config.json}:/app/config.json
+      - ${SPO_LOG_DIR:-../logs}:/app/logs
+    environment:
+      - TZ=${TZ:-Asia/Jakarta}
+      - CONFIG_PATH=/app/config.json
+      - GRAPH_DOWNLOAD_CHUNK_SIZE=${GRAPH_DOWNLOAD_CHUNK_SIZE:-4194304}
+      - GRAPH_LIST_PAGE_SIZE=${GRAPH_LIST_PAGE_SIZE:-999}
+      - BACKUP_MANIFEST_FLUSH_EVERY=${BACKUP_MANIFEST_FLUSH_EVERY:-25}
+      - BACKUP_MANIFEST_FLUSH_INTERVAL=${BACKUP_MANIFEST_FLUSH_INTERVAL:-5}
+      - HTTP_POOL_CONNECTIONS=${HTTP_POOL_CONNECTIONS:-64}
+      - HTTP_POOL_MAXSIZE=${HTTP_POOL_MAXSIZE:-64}
+    depends_on: [redis, spo-backup]
+    networks: [backup-net]
+
+networks:
+  backup-net:
+    driver: bridge
+    name: spo-backup-net

@@ -1,0 +1,115 @@
+{% extends "base.html" %}
+{% block title %}Logs{% endblock %}
+{% block page_title %}<i class="bi bi-terminal-fill" style="color:var(--accent);"></i> System Logs{% endblock %}
+{% block content %}
+
+<!-- Info card -->
+<div class="glass-card mb-4" style="background:linear-gradient(135deg,rgba(99,102,241,0.08),rgba(6,182,212,0.06));">
+    <div class="card-body" style="padding:16px 22px;">
+        <div class="d-flex align-items-center gap-3">
+            <i class="bi bi-info-circle-fill" style="color:var(--accent);font-size:24px;"></i>
+            <div style="flex:1;">
+                <strong>Real-time activity log</strong> — auto-refresh setiap 3 detik. Sumber: 
+                <code>/app/logs/spo_backup.log</code>
+            </div>
+            <span class="badge-modern badge-success" id="autoStatus">
+                <i class="bi bi-arrow-repeat spin"></i> AUTO-REFRESH
+            </span>
+        </div>
+    </div>
+</div>
+
+<div class="glass-card">
+    <div class="card-header">
+        <h6><i class="bi bi-terminal"></i> Recent Activity <span style="color:var(--text-dim);font-size:12px;">(last 200 lines)</span></h6>
+        <div class="d-flex gap-2">
+            <button class="btn-modern btn-ghost-modern" onclick="toggleAutoRefresh()" id="autoBtn" style="padding:6px 14px;font-size:12px;">
+                <i class="bi bi-pause-fill"></i> Pause
+            </button>
+            <button class="btn-modern btn-ghost-modern" onclick="refresh()" style="padding:6px 14px;font-size:12px;">
+                <i class="bi bi-arrow-clockwise"></i> Refresh
+            </button>
+            <button class="btn-modern btn-ghost-modern" onclick="clearView()" style="padding:6px 14px;font-size:12px;">
+                <i class="bi bi-eraser"></i> Clear View
+            </button>
+        </div>
+    </div>
+    <div class="card-body p-0">
+        <div class="log-viewer" id="logViewer" style="border-radius:0;border:none;max-height:75vh;">
+            {% for line in logs %}<div class="{% if 'ERROR' in line %}log-error{% elif 'WARNING' in line %}log-warn{% elif '✅' in line or 'COMPLETED' in line %}log-success{% else %}log-info{% endif %}">{{ line }}</div>{% else %}<div style="color:var(--text-dim);text-align:center;padding:40px;">
+                <i class="bi bi-clock-history" style="font-size:48px;display:block;margin-bottom:12px;opacity:0.5;"></i>
+                No logs yet. Run a backup to generate logs.
+            </div>{% endfor %}
+        </div>
+    </div>
+</div>
+
+<!-- Help -->
+<div style="margin-top:18px;font-size:12px;color:var(--text-dim);text-align:center;">
+    <i class="bi bi-keyboard"></i> Tips: Press <kbd style="background:rgba(255,255,255,0.1);padding:2px 6px;border-radius:4px;color:var(--text);">End</kbd> to scroll to bottom
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+let autoRefreshInterval = null;
+let autoRefreshEnabled = true;
+
+async function refresh() {
+    try {
+        const d = await apiCall('/api/logs?lines=200');
+        const v = document.getElementById('logViewer');
+        if (d.logs && d.logs.length > 0) {
+            const wasAtBottom = (v.scrollTop + v.clientHeight >= v.scrollHeight - 50);
+            v.innerHTML = d.logs.map(l => {
+                let cls = 'log-info';
+                if (l.includes('ERROR') || l.includes('❌')) cls = 'log-error';
+                else if (l.includes('WARNING') || l.includes('⚠')) cls = 'log-warn';
+                else if (l.includes('✅') || l.includes('COMPLETED')) cls = 'log-success';
+                return `<div class="${cls}">${l.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>`;
+            }).join('');
+            if (wasAtBottom) v.scrollTop = v.scrollHeight;
+        }
+    } catch(e) { console.error(e); }
+}
+
+function toggleAutoRefresh() {
+    autoRefreshEnabled = !autoRefreshEnabled;
+    const btn = document.getElementById('autoBtn');
+    const status = document.getElementById('autoStatus');
+    if (autoRefreshEnabled) {
+        startAutoRefresh();
+        btn.innerHTML = '<i class="bi bi-pause-fill"></i> Pause';
+        status.innerHTML = '<i class="bi bi-arrow-repeat spin"></i> AUTO-REFRESH';
+        status.className = 'badge-modern badge-success';
+    } else {
+        clearInterval(autoRefreshInterval);
+        btn.innerHTML = '<i class="bi bi-play-fill"></i> Resume';
+        status.innerHTML = '<i class="bi bi-pause-fill"></i> PAUSED';
+        status.className = 'badge-modern badge-warning';
+    }
+}
+
+function startAutoRefresh() {
+    if (autoRefreshInterval) clearInterval(autoRefreshInterval);
+    autoRefreshInterval = setInterval(refresh, 3000);
+}
+
+function clearView() {
+    document.getElementById('logViewer').innerHTML = '<div style="color:var(--text-dim);text-align:center;padding:40px;">View cleared. Refresh to load again.</div>';
+}
+
+// Keyboard shortcut
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'End') {
+        const v = document.getElementById('logViewer');
+        v.scrollTop = v.scrollHeight;
+    }
+});
+
+// Initial setup
+startAutoRefresh();
+const v = document.getElementById('logViewer');
+v.scrollTop = v.scrollHeight;
+</script>
+{% endblock %}

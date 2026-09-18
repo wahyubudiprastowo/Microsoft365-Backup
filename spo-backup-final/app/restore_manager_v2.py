@@ -1,0 +1,457 @@
+"""Restore Manager v2 for multi-workload restore jobs."""
+import json
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+
+import redis as redis_lib
+from celery.result import AsyncResult
+
+from app.backup_registry import BackupRegistry
+from app.workloads import WORKLOAD_META, get_workload
+
+import logging
+
+log = logging.getLogger("spo_backup")
+
+
+class RestoreManagerV2:
+    JOB_PREFIX = "m365:restore_job:"
+    JOB_LIST = "m365:restore_jobs:list"
+
+    def __init__(self):
+        self.r = redis_lib.Redis(host="redis", port=6379, db=2, decode_responses=True)
+
+    def _job_key(self, job_id: str) -> str:
+        return self.JOB_PREFIX + job_id
+
+    def _normalize_job_record(self, job: dict | None) -> dict | None:
+        if not job:
+            return job
+        errors = []
+        if isinstance(job.get("result"), dict):
+            errors.extend(job["result"].get("errors") or [])
+        if job.get("error"):
+            errors.append(job.get("error"))
+        if job.get("status") == "completed" and any(str(err).startswith("Fatal:") for err in errors):
+            job["status"] = "failed"
+            job["error"] = "; ".join(str(err) for err in errors[:3])
+            self.r.set(self._job_key(job["id"]), json.dumps(job))
+        return job
+
+    def create_job(self, config: dict) -> dict:
+        workload, mode, backup_path = self._validate_config(config)
+        source_tenant_id = str(config.get("source_tenant_id") or config.get("tenant_id") or "").strip()
+        source_tenant_name = str(config.get("source_tenant_name") or config.get("tenant_name") or "").strip()
+        target_tenant_id = str(config.get("target_tenant_id") or source_tenant_id).strip()
+        target_tenant_name = str(config.get("target_tenant_name") or source_tenant_name).strip()
+
+        job = {
+            "id": str(uuid.uuid4()),
+            "tenant_id": source_tenant_id,
+            "tenant_name": source_tenant_name,
+            "source_tenant_id": source_tenant_id,
+            "source_tenant_name": source_tenant_name,
+            "target_tenant_id": target_tenant_id,
+            "target_tenant_name": target_tenant_name,
+            "cross_tenant": bool(source_tenant_id and target_tenant_id and source_tenant_id != target_tenant_id),
+            "operation_kind": "copy" if source_tenant_id and target_tenant_id and source_tenant_id != target_tenant_id else "restore",
+            "operation_label": "Cross-Tenant Copy" if source_tenant_id and target_tenant_id and source_tenant_id != target_tenant_id else "Restore",
+            "workload": workload,
+            "backup_path": str(backup_path),
+            "source_backup": config["source_backup"],
+            "mode": mode,
+            "status": "queued",
+            "progress": 0,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "started_at": None,
+            "completed_at": None,
+            "result": None,
+            "error": None,
+            "task_id": None,
+        }
+
+        if workload == "sharepoint":
+            job["target_site_id"] = config.get("target_site_id")
+            job["target_site_path"] = config.get("target_site_path")
+            job["target_library_name"] = config.get("target_library_name")
+            job["target_folder_path"] = config.get("target_folder_path")
+        elif workload == "onedrive":
+            job["user_mapping"] = config.get("user_mapping", {})
+            job["target_folder"] = config.get("target_folder", "M365 Restored")
+        elif workload == "outlook":
+            job["user_mapping"] = config.get("user_mapping", {})
+            job["restore_items"] = config.get("restore_items", ["messages", "calendar", "contacts"])
+        elif workload == "teams":
+            job["export_format"] = config.get("export_format", "all")
+            job["export_dir"] = config.get("export_dir")
+
+        self.r.set(self._job_key(job["id"]), json.dumps(job))
+        self.r.lpush(self.JOB_LIST, job["id"])
+        self.r.ltrim(self.JOB_LIST, 0, 99)
+        log.info(
+            f"Restore job created: {job['id'][:8]} — {job['workload']} "
+            f"{job.get('source_tenant_name', '?')} -> {job.get('target_tenant_name', '?')}"
+        )
+        return job
+
+    def get_job(self, job_id: str):
+        data = self.r.get(self._job_key(job_id))
+        return self._normalize_job_record(json.loads(data)) if data else None
+
+    def list_jobs(self, limit: int = 50):
+        ids = self.r.lrange(self.JOB_LIST, 0, max(limit - 1, 0))
+        jobs = []
+        for job_id in ids:
+            job = self.get_job(job_id)
+            if job:
+                jobs.append(job)
+        return jobs
+
+    def update_job(self, job_id: str, updates: dict):
+        job = self.get_job(job_id)
+        if not job:
+            return None
+        job.update(updates)
+        self.r.set(self._job_key(job_id), json.dumps(job))
+        return job
+
+    def delete_job(self, job_id: str) -> bool:
+        job = self.get_job(job_id)
+        if not job:
+            return False
+        if job.get("status") in {"queued", "running", "paused"}:
+            return False
+        self.r.delete(self._job_key(job_id))
+        self.r.lrem(self.JOB_LIST, 0, job_id)
+        return True
+
+    def _list_restore_task_ids(self) -> set[str]:
+        try:
+            from app.tasks import celery_app
+
+            inspector = celery_app.control.inspect(timeout=1.5)
+            snapshots = [
+                inspector.active() or {},
+                inspector.reserved() or {},
+                inspector.scheduled() or {},
+            ]
+            task_ids = set()
+            for payload in snapshots:
+                for worker_tasks in payload.values():
+                    for raw_item in worker_tasks or []:
+                        item = raw_item.get("request", raw_item) if isinstance(raw_item, dict) and "request" in raw_item else raw_item
+                        if not isinstance(item, dict):
+                            continue
+                        if item.get("name") != "app.tasks.execute_restore_job_v2" and item.get("type") != "app.tasks.execute_restore_job_v2":
+                            continue
+                        task_id = item.get("id")
+                        if task_id:
+                            task_ids.add(task_id)
+            return task_ids
+        except Exception as e:
+            log.warning(f"Failed to inspect restore task state: {e}")
+            return set()
+
+    def recover_stale_queued_jobs(self, limit: int = 100) -> list[dict]:
+        from app.operation_queue import OperationQueue
+        from app.tasks import celery_app
+
+        queue = OperationQueue()
+        queue_items = {
+            (item.get("payload") or {}).get("job_id"): item
+            for item in queue.list("restore", limit=max(limit * 2, 100))
+        }
+        active_task_ids = self._list_restore_task_ids()
+        recovered = []
+
+        for job in self.list_jobs(limit=limit):
+            if job.get("status") != "queued":
+                continue
+
+            job_id = job["id"]
+            task_id = job.get("task_id")
+            backup_path = Path(str(job.get("backup_path") or "")).resolve() if job.get("backup_path") else None
+
+            if not backup_path or not backup_path.exists() or not backup_path.is_dir():
+                self.update_job(job_id, {
+                    "status": "failed",
+                    "error": f"Backup path not found: {backup_path or job.get('backup_path')}",
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                })
+                if job_id in queue_items:
+                    queue.remove(queue_items[job_id]["id"], group="restore")
+                recovered.append({"job_id": job_id, "action": "marked_failed_missing_backup"})
+                continue
+
+            if task_id and task_id not in active_task_ids:
+                state = str(AsyncResult(task_id, app=celery_app).state or "").upper()
+                if state in {"FAILURE", "BACKUP_FAILED"}:
+                    self.update_job(job_id, {
+                        "status": "failed",
+                        "error": "Restore task stopped before completion.",
+                        "completed_at": datetime.now(timezone.utc).isoformat(),
+                    })
+                    recovered.append({"job_id": job_id, "action": "marked_failed", "task_id": task_id})
+                    continue
+                if state == "REVOKED":
+                    self.update_job(job_id, {
+                        "status": "cancelled",
+                        "completed_at": datetime.now(timezone.utc).isoformat(),
+                    })
+                    recovered.append({"job_id": job_id, "action": "marked_cancelled", "task_id": task_id})
+                    continue
+                self.update_job(job_id, {"task_id": None, "started_at": None})
+                job["task_id"] = None
+                recovered.append({"job_id": job_id, "action": "requeue_dispatch", "task_id": task_id})
+
+            if not job.get("task_id") and job_id not in queue_items:
+                queue.enqueue(
+                    "restore",
+                    "restore_v2",
+                    {"job_id": job_id},
+                    f"Restore {job.get('workload', 'job')}",
+                    f"{job.get('tenant_name') or 'Unknown tenant'} · {job.get('source_backup') or ''}",
+                )
+                recovered.append({"job_id": job_id, "action": "queued"})
+
+        return recovered
+
+    def execute(self, job_id: str, task_id: str = None) -> dict:
+        from app.restore import get_restore
+        from app.task_control import PauseException
+        from app.tenant_manager import TenantManager
+
+        job = self.get_job(job_id)
+        if not job:
+            return {"error": "Job not found"}
+        self.update_job(job_id, {
+            "status": "running",
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "task_id": task_id,
+        })
+
+        tenant = TenantManager().get_tenant(job.get("target_tenant_id") or job["tenant_id"], include_secret=True)
+        if not tenant:
+            self.update_job(job_id, {
+                "status": "failed",
+                "error": f"Target tenant not found: {job.get('target_tenant_id') or job['tenant_id']}",
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            })
+            return {"error": "Target tenant not found"}
+
+        def progress_cb(evt, data):
+            processed = data.get("items_processed", 0)
+            failed = data.get("items_failed", 0)
+            total_so_far = processed + failed
+            progress = min(99, int((processed / max(total_so_far, 1)) * 100)) if total_so_far else 5
+            self.update_job(job_id, {
+                "progress": progress,
+                "current_target": data.get("target_name", ""),
+                "items_processed": processed,
+                "items_failed": failed,
+                "bytes_uploaded": data.get("bytes_uploaded", 0),
+            })
+
+        kwargs = {"mode": job["mode"]}
+        if job["workload"] == "sharepoint":
+            kwargs["target_site_id"] = job.get("target_site_id")
+            kwargs["target_site_path"] = job.get("target_site_path")
+            kwargs["target_library_name"] = job.get("target_library_name")
+            kwargs["target_folder_path"] = job.get("target_folder_path")
+        elif job["workload"] == "onedrive":
+            kwargs["user_mapping"] = job.get("user_mapping", {})
+            kwargs["target_folder"] = job.get("target_folder", "Restored")
+        elif job["workload"] == "outlook":
+            kwargs["user_mapping"] = job.get("user_mapping", {})
+            kwargs["restore_items"] = job.get("restore_items", ["messages", "calendar", "contacts"])
+        elif job["workload"] == "teams":
+            kwargs["export_format"] = job.get("export_format", "all")
+            kwargs["export_dir"] = job.get("export_dir")
+
+        try:
+            restorer = get_restore(
+                workload=job["workload"],
+                tenant=tenant,
+                backup_path=job["backup_path"],
+                progress_callback=progress_cb,
+                task_id=task_id,
+                **kwargs,
+            )
+            result = restorer.restore()
+            status = "completed"
+            if result.get("cancelled"):
+                status = "cancelled"
+            elif any(str(err).startswith("Fatal:") for err in (result.get("errors") or [])):
+                status = "failed"
+            elif result.get("targets_failed", 0) > 0 and result.get("targets_processed", 0) == 0:
+                status = "failed"
+            self.update_job(job_id, {
+                "status": status,
+                "progress": 100 if status in {"completed", "failed"} else job.get("progress", 0),
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "error": "; ".join(str(err) for err in (result.get("errors") or [])[:3]) if status == "failed" else None,
+                "result": result,
+            })
+            return result
+        except PauseException:
+            self.update_job(job_id, {
+                "status": "cancelled",
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            })
+            return {"cancelled": True}
+        except Exception as e:
+            log.error(f"Restore job {job_id[:8]} failed: {e}", exc_info=True)
+            self.update_job(job_id, {
+                "status": "failed",
+                "error": str(e),
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            })
+            return {"error": str(e)}
+
+    def dry_run(self, config: dict) -> dict:
+        from app.restore import get_restore
+        from app.tenant_manager import TenantManager
+
+        workload, mode, backup_path = self._validate_config(config)
+        source_tenant_id = str(config.get("source_tenant_id") or config.get("tenant_id") or "").strip()
+        target_tenant_id = str(config.get("target_tenant_id") or source_tenant_id).strip()
+        target_tenant = TenantManager().get_tenant(target_tenant_id, include_secret=True)
+        if not target_tenant:
+            return {"error": "Target tenant not found"}
+
+        kwargs = {"mode": mode}
+        if workload == "sharepoint":
+            kwargs["target_site_id"] = config.get("target_site_id")
+            kwargs["target_site_path"] = config.get("target_site_path")
+            kwargs["target_library_name"] = config.get("target_library_name")
+            kwargs["target_folder_path"] = config.get("target_folder_path")
+        elif workload == "onedrive":
+            kwargs["user_mapping"] = config.get("user_mapping", {})
+            kwargs["target_folder"] = config.get("target_folder", "M365 Restored")
+        elif workload == "outlook":
+            kwargs["user_mapping"] = config.get("user_mapping", {})
+            kwargs["restore_items"] = config.get("restore_items", ["messages", "calendar", "contacts"])
+        elif workload == "teams":
+            kwargs["export_format"] = config.get("export_format", "all")
+            kwargs["export_dir"] = config.get("export_dir")
+
+        result = get_restore(
+            workload=workload,
+            tenant=target_tenant,
+            backup_path=str(backup_path),
+            **kwargs,
+        ).dry_run()
+        result["source_tenant_id"] = source_tenant_id or None
+        result["target_tenant_id"] = target_tenant_id or None
+        result["cross_tenant"] = bool(source_tenant_id and target_tenant_id and source_tenant_id != target_tenant_id)
+        result["operation_kind"] = "copy" if result["cross_tenant"] else "restore"
+        result["operation_label"] = "Cross-Tenant Copy" if result["cross_tenant"] else "Restore"
+        result["source_tenant_name"] = str(config.get("source_tenant_name") or config.get("tenant_name") or "").strip() or None
+        result["target_tenant_name"] = str(config.get("target_tenant_name") or "").strip() or None
+        result["permission_preflight"] = self._check_restore_permission(workload, target_tenant)
+        result["backup_exists"] = True
+        result["backup_path"] = str(backup_path)
+        return result
+
+    def _classify_permission_error(self, raw_error: str) -> dict:
+        text = str(raw_error or "")
+        lower = text.lower()
+        if "403" in text or "forbidden" in lower:
+            return {
+                "ready": False,
+                "error_type": "permission_denied",
+                "message": "Target tenant does not currently expose enough Microsoft Graph permission for this restore workload.",
+                "error_detail": text,
+            }
+        if "auth failed" in lower or "unauthorized" in lower or "401" in text:
+            return {
+                "ready": False,
+                "error_type": "auth_failed",
+                "message": "Authentication to Microsoft Graph failed for the selected tenant.",
+                "error_detail": text,
+            }
+        return {
+            "ready": False,
+            "error_type": "discovery_failed",
+            "message": "Restore target readiness could not be confirmed for this tenant.",
+            "error_detail": text,
+        }
+
+    def _check_restore_permission(self, workload: str, tenant: dict) -> dict:
+        base = {
+            "ready": True,
+            "workload": workload,
+            "required_scopes": WORKLOAD_META.get(workload, {}).get("required_scopes", []),
+        }
+        try:
+            targets = get_workload(workload, tenant).list_targets()
+            if targets and isinstance(targets, list) and targets[0].get("error"):
+                issue = self._classify_permission_error(targets[0]["error"])
+                issue["workload"] = workload
+                issue["required_scopes"] = base["required_scopes"]
+                return issue
+            base["targets_discovered"] = len(targets or [])
+            return base
+        except Exception as e:
+            issue = self._classify_permission_error(str(e))
+            issue["workload"] = workload
+            issue["required_scopes"] = base["required_scopes"]
+            return issue
+
+    def _validate_backup_path(self, backup_path: Path):
+        registry = BackupRegistry()
+        allowed_roots = [registry.legacy_root.resolve(), registry.tenant_root.resolve()]
+        if not any(str(backup_path).startswith(str(root)) for root in allowed_roots):
+            raise ValueError(f"Backup path not allowed: {backup_path}")
+
+    def _validate_config(self, config: dict):
+        from app.tenant_manager import TenantManager
+
+        for field in ["workload", "backup_path", "source_backup"]:
+            if not config.get(field):
+                raise ValueError(f"Missing required field: {field}")
+        source_tenant_id = str(config.get("source_tenant_id") or config.get("tenant_id") or "").strip()
+        target_tenant_id = str(config.get("target_tenant_id") or source_tenant_id).strip()
+        if not source_tenant_id:
+            raise ValueError("Missing required field: source_tenant_id")
+        if not target_tenant_id:
+            raise ValueError("Missing required field: target_tenant_id")
+        tm = TenantManager()
+        if not tm.get_tenant(source_tenant_id, include_secret=False):
+            raise ValueError(f"Source tenant not found: {source_tenant_id}")
+        if not tm.get_tenant(target_tenant_id, include_secret=False):
+            raise ValueError(f"Target tenant not found: {target_tenant_id}")
+
+        workload = str(config["workload"]).strip().lower()
+        if workload not in {"sharepoint", "onedrive", "outlook", "teams"}:
+            raise ValueError(f"Unknown workload: {workload}")
+
+        mode = str(config.get("mode", "merge")).strip().lower()
+        if mode not in {"overwrite", "merge", "new_location"}:
+            raise ValueError(f"Invalid mode: {mode}")
+
+        backup_path = Path(config["backup_path"]).resolve()
+        self._validate_backup_path(backup_path)
+        if not backup_path.exists() or not backup_path.is_dir():
+            raise ValueError(f"Backup path not found: {backup_path}")
+
+        if workload == "sharepoint":
+            target_site_id = (config.get("target_site_id") or "").strip()
+            target_site_path = (config.get("target_site_path") or "").strip()
+            if not target_site_id and not target_site_path:
+                raise ValueError("SharePoint restore requires target_site_path or target_site_id")
+        elif workload == "outlook":
+            allowed_items = {"messages", "calendar", "contacts"}
+            restore_items = config.get("restore_items") or []
+            invalid_items = [item for item in restore_items if item not in allowed_items]
+            if not restore_items:
+                raise ValueError("Outlook restore requires at least one restore item")
+            if invalid_items:
+                raise ValueError(f"Invalid Outlook restore items: {', '.join(invalid_items)}")
+        elif workload == "teams":
+            export_format = str(config.get("export_format", "all")).strip().lower()
+            if export_format not in {"all", "html", "json", "txt"}:
+                raise ValueError(f"Invalid Teams export format: {export_format}")
+
+        return workload, mode, backup_path
