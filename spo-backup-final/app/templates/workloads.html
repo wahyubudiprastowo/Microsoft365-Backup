@@ -153,8 +153,11 @@
             <button type="button" class="btn-close btn-close-white" aria-label="Close" onclick="closeTargetsModal()"></button>
         </div>
         <div class="scope-overlay-body">
-            <div id="targetsBanner" style="margin-bottom:14px;"></div>
-            <div id="targetsSelectionControls" style="display:none;margin-bottom:14px;"></div>
+            <div id="targetsStickyTools">
+                <div id="targetsBanner" style="margin-bottom:14px;"></div>
+                <div id="targetsSelectionControls" style="display:none;margin-bottom:14px;"></div>
+                <div id="targetsToolbar" style="display:none;margin-bottom:14px;"></div>
+            </div>
             <div id="targetsList">Loading...</div>
         </div>
         <div class="scope-overlay-footer">
@@ -219,6 +222,13 @@
         min-height: 180px;
         flex: 1 1 auto;
     }
+    #targetsStickyTools {
+        position: sticky;
+        top: 0;
+        z-index: 5;
+        background: linear-gradient(180deg, rgba(10,14,26,0.98) 0%, rgba(10,14,26,0.95) 88%, rgba(10,14,26,0) 100%);
+        padding-bottom: 10px;
+    }
     .scope-overlay-footer {
         border-top: 1px solid var(--border);
         display: flex;
@@ -272,7 +282,7 @@
 const workloadMeta = {{ workload_meta | tojson }};
 const activeTenant = {{ active_tenant | tojson }};
 const workloadSelections = activeTenant.workload_target_selection || {};
-const sharePointSiteSelection = {{ sharepoint_site_selection | tojson }};
+let sharePointSiteSelection = {{ sharepoint_site_selection | tojson }};
 let enabledWorkloads = new Set((activeTenant.workloads_enabled || []).map(item => String(item)));
 let currentTargetContext = {
     workload: null,
@@ -280,7 +290,27 @@ let currentTargetContext = {
     selection: { mode: 'all', selected_ids: [] },
     targets: [],
     mode: 'view',
+    filteredTargets: [],
+    search: '',
+    filterKind: 'all',
 };
+let targetsAutoEstimateInFlight = false;
+
+function updateSaveTargetsButtonLabel() {
+    const saveBtn = document.getElementById('saveTargetsBtn');
+    if (!saveBtn || !currentTargetContext.workload) return;
+    const isSharePointSync = currentTargetContext.workload === 'sharepoint';
+    const selectedCount = Array.isArray(currentTargetContext.selection?.selected_ids)
+        ? currentTargetContext.selection.selected_ids.length
+        : 0;
+    if (isSharePointSync) {
+        saveBtn.innerHTML = `<i class="bi bi-cloud-arrow-down"></i> Add Selected to Backup Sites${selectedCount ? ` (${selectedCount})` : ''}`;
+        saveBtn.disabled = selectedCount === 0;
+        return;
+    }
+    saveBtn.innerHTML = '<i class="bi bi-save"></i> Save Target Scope';
+    saveBtn.disabled = false;
+}
 
 function openTargetsModal() {
     const modal = document.getElementById('targetsModal');
@@ -296,6 +326,12 @@ function closeTargetsModal() {
     modal.classList.remove('open');
     modal.setAttribute('aria-hidden', 'true');
     document.body.style.overflow = '';
+}
+
+function scrollTargetsModalToTop() {
+    const body = document.querySelector('#targetsModal .scope-overlay-body');
+    if (!body) return;
+    body.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
 function renderEnabledSummary() {
@@ -392,9 +428,18 @@ async function toggleWorkload(workload, input) {
     }
 }
 
-function buildTargetRow(target, allowSelection, selectedIds) {
+function buildTargetRow(workload, target, allowSelection, selectedIds) {
     const targetId = String(target.id || '');
     const checked = selectedIds.has(targetId) ? 'checked' : '';
+    const sizeStatus = target.size_status || (target.size_human || target.size_bytes != null ? 'cached' : 'unknown');
+    const sizeLabel = target.size_human || (target.size_bytes != null ? formatBytes(Number(target.size_bytes || 0)) : 'Unknown');
+    const sizeDetail = sizeStatus === 'cached'
+        ? `${target.size_confidence || 'cached'} estimate${target.size_updated_at ? ` • ${target.size_updated_at}` : ''}`
+        : 'Not estimated yet';
+    const sizeColor = sizeStatus === 'cached' ? 'var(--accent)' : 'var(--text-dim)';
+    const estimateAction = workload === 'sharepoint' && sizeStatus !== 'cached'
+        ? `<button type="button" class="btn-modern btn-ghost-modern" style="padding:4px 8px;font-size:10px;margin-top:6px;" data-target-id="${escapeAttr(targetId)}" onclick="estimateTargetSizeByButton(this)"><i class="bi bi-calculator"></i> Estimate</button>`
+        : '';
     const selector = allowSelection
         ? `<td style="width:52px;"><input class="form-check-input target-check" type="checkbox" value="${escapeAttr(targetId)}" ${checked}></td>`
         : '';
@@ -415,24 +460,162 @@ function buildTargetRow(target, allowSelection, selectedIds) {
                     ${target.enabled ? `<span class="badge-modern badge-success">Enabled for Backup</span>` : ''}
                 </div>` : ''}
             </td>
-            <td style="text-align:right;"><span class="badge-modern badge-primary">${escapeHtml(target.type || 'target')}</span></td>
+            <td style="text-align:right;min-width:140px;">
+                <div id="targetSize-${escapeAttr(targetId)}">
+                    <strong style="color:${sizeColor};">${escapeHtml(sizeLabel)}</strong>
+                    <div style="font-size:10px;color:var(--text-dim);margin-top:3px;" title="${escapeAttr(sizeDetail)}">${escapeHtml(sizeStatus === 'cached' ? (target.size_confidence || 'cached') : 'Not estimated')}</div>
+                    ${estimateAction}
+                </div>
+            </td>
+            <td style="text-align:right;"><span class="badge-modern badge-primary">${escapeHtml(target.target_kind_label || target.type || 'target')}</span></td>
         </tr>`;
+}
+
+function syncCurrentSelectionFromDom() {
+    if (!currentTargetContext.workload) return;
+    const selected = new Set((currentTargetContext.selection?.selected_ids || []).map(item => String(item)));
+    document.querySelectorAll('.target-check').forEach(el => {
+        if (el.checked) selected.add(el.value);
+        else selected.delete(el.value);
+    });
+    const modeEl = document.querySelector('input[name="selectionMode"]:checked');
+    currentTargetContext.selection = {
+        mode: currentTargetContext.workload === 'sharepoint' ? 'selected' : (modeEl ? modeEl.value : currentTargetContext.selection.mode || 'all'),
+        selected_ids: Array.from(selected),
+    };
+    updateSaveTargetsButtonLabel();
+}
+
+function targetMatchesSearch(target, query) {
+    if (!query) return true;
+    const haystack = [
+        target.name,
+        target.email,
+        target.url,
+        target.path,
+        target.id,
+        target.graph_id,
+        target.description,
+    ].map(value => String(value || '').toLowerCase()).join(' ');
+    return haystack.includes(query.toLowerCase());
+}
+
+function targetMatchesKindFilter(target, filterKind) {
+    const kind = String(target.target_kind || '');
+    const isUnknown = (target.size_status || 'unknown') !== 'cached';
+    const selectedIds = new Set((currentTargetContext.selection?.selected_ids || []).map(item => String(item)));
+    if (!filterKind || filterKind === 'all') return true;
+    if (filterKind === 'standard') return Boolean(target.is_standard_site);
+    if (filterKind === 'content_storage') return kind === 'content_storage';
+    if (filterKind === 'selected') return selectedIds.has(String(target.id || ''));
+    if (filterKind === 'unknown') return isUnknown;
+    if (filterKind === 'estimated') return !isUnknown;
+    return kind === filterKind;
+}
+
+function getFilteredTargets() {
+    const query = String(currentTargetContext.search || '').trim();
+    const filterKind = String(currentTargetContext.filterKind || 'all');
+    return (currentTargetContext.targets || []).filter(target =>
+        targetMatchesSearch(target, query) && targetMatchesKindFilter(target, filterKind)
+    );
+}
+
+function renderTargetsToolbar(workload, filteredCount, totalCount) {
+    const toolbar = document.getElementById('targetsToolbar');
+    if (!toolbar) return;
+    if (!totalCount) {
+        toolbar.style.display = 'none';
+        toolbar.innerHTML = '';
+        return;
+    }
+    toolbar.style.display = 'block';
+    const unknownCount = (currentTargetContext.filteredTargets || []).filter(t => (t.size_status || 'unknown') !== 'cached').length;
+    const estimatedCount = Math.max(0, filteredCount - unknownCount);
+    const selectedCount = Array.isArray(currentTargetContext.selection?.selected_ids)
+        ? currentTargetContext.selection.selected_ids.length
+        : 0;
+    const estimateButton = workload === 'sharepoint'
+        ? `<button type="button" class="btn-modern btn-ghost-modern" onclick="estimateVisibleUnknownTargets()" style="white-space:nowrap;"><i class="bi bi-calculator"></i> Estimate Visible Unknown</button>`
+        : '';
+    const filterSelect = workload === 'sharepoint'
+        ? `<select id="targetKindFilter" onchange="handleTargetKindFilter(this.value)" style="min-width:210px;">
+                <option value="standard" ${currentTargetContext.filterKind === 'standard' ? 'selected' : ''}>Standard Sites Only</option>
+                <option value="all" ${currentTargetContext.filterKind === 'all' ? 'selected' : ''}>All Target Types</option>
+                <option value="selected" ${currentTargetContext.filterKind === 'selected' ? 'selected' : ''}>Selected Only</option>
+                <option value="unknown" ${currentTargetContext.filterKind === 'unknown' ? 'selected' : ''}>Unknown Only</option>
+                <option value="estimated" ${currentTargetContext.filterKind === 'estimated' ? 'selected' : ''}>Estimated Only</option>
+                <option value="content_storage" ${currentTargetContext.filterKind === 'content_storage' ? 'selected' : ''}>Content Storage Only</option>
+            </select>`
+        : '';
+    toolbar.innerHTML = `
+        <div style="display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:12px;padding:12px;">
+            <div style="position:relative;min-width:280px;flex:1;">
+                <i class="bi bi-search" style="position:absolute;left:12px;top:50%;transform:translateY(-50%);color:var(--text-dim);"></i>
+                <input id="targetSearchInput" type="search" placeholder="Search site name, URL, path, or target id..." value="${escapeAttr(currentTargetContext.search || '')}" oninput="handleTargetSearch(this.value)" style="width:100%;padding-left:36px;">
+            </div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+                ${filterSelect}
+                <span class="badge-modern badge-info">Showing: ${filteredCount}/${totalCount}</span>
+                ${workload === 'sharepoint' ? `<span class="badge-modern badge-success">Selected: ${selectedCount}</span>` : ''}
+                ${workload === 'sharepoint' ? `<span class="badge-modern badge-success">Estimated: ${estimatedCount}</span>` : ''}
+                ${workload === 'sharepoint' ? `<span class="badge-modern badge-warning">Unknown visible: ${unknownCount}</span>` : ''}
+                ${estimateButton}
+            </div>
+        </div>`;
+}
+
+function handleTargetSearch(value) {
+    syncCurrentSelectionFromDom();
+    currentTargetContext.search = String(value || '');
+    refreshTargetsView();
+    const input = document.getElementById('targetSearchInput');
+    if (input) {
+        input.focus();
+        const len = input.value.length;
+        input.setSelectionRange(len, len);
+    }
+}
+
+function handleTargetKindFilter(value) {
+    currentTargetContext.filterKind = String(value || 'all');
+    refreshTargetsView();
+}
+
+function refreshTargetsView() {
+    const filtered = getFilteredTargets();
+    currentTargetContext.filteredTargets = filtered;
+    if (currentTargetContext.workload === 'sharepoint') {
+        renderSharePointSelectionControls(currentTargetContext.selection, currentTargetContext.targets);
+    } else if (currentTargetContext.mode === 'select') {
+        renderTargetSelectionControls(currentTargetContext.selection, currentTargetContext.targets);
+    }
+    renderTargetsToolbar(currentTargetContext.workload, filtered.length, (currentTargetContext.targets || []).length);
+    renderTargetsTable(currentTargetContext.workload, filtered, currentTargetContext.selection, currentTargetContext.workload === 'sharepoint' || currentTargetContext.mode === 'select');
 }
 
 function renderTargetsTable(workload, targets, selection, allowSelection) {
     const selectedIds = new Set((selection.selected_ids || []).map(item => String(item)));
     const header = allowSelection ? '<th style="width:52px;"></th>' : '';
+    const sizeHeader = workload === 'sharepoint' ? '<th style="text-align:right;">Estimated Backup Data</th>' : '<th style="text-align:right;">Size</th>';
+    const bodyRows = targets.length ? targets.map(target => buildTargetRow(workload, target, allowSelection, selectedIds)).join('') : `
+                <tr>
+                    <td colspan="${allowSelection ? 4 : 3}" style="padding:26px 18px;text-align:center;color:var(--text-dim);">
+                        No targets match the current search or filter.
+                    </td>
+                </tr>`;
     document.getElementById('targetsList').innerHTML = `
         <table class="table-modern">
             <thead>
                 <tr>
                     ${header}
                     <th>Target</th>
+                    ${sizeHeader}
                     <th style="text-align:right;">Type</th>
                 </tr>
             </thead>
             <tbody>
-                ${targets.map(target => buildTargetRow(target, allowSelection, selectedIds)).join('')}
+                ${bodyRows}
             </tbody>
         </table>`;
     bindTargetRowSelection();
@@ -448,7 +631,11 @@ function bindTargetRowSelection() {
             checkbox.checked = !checkbox.checked;
             const selectedMode = document.querySelector('input[name="selectionMode"][value="selected"]');
             if (selectedMode) selectedMode.checked = true;
+            syncCurrentSelectionFromDom();
         });
+    });
+    document.querySelectorAll('#targetsList .target-check').forEach(checkbox => {
+        checkbox.addEventListener('change', () => syncCurrentSelectionFromDom());
     });
 }
 
@@ -505,11 +692,183 @@ function setTargetChecks(checked) {
     });
     const selectedMode = document.querySelector('input[name="selectionMode"][value="selected"]');
     if (selectedMode) selectedMode.checked = true;
+    syncCurrentSelectionFromDom();
 }
 
 function renderTargetBanner(html) {
     const banner = document.getElementById('targetsBanner');
     if (banner) banner.innerHTML = html || '';
+}
+
+function setSaveTargetsButtonState({ loading = false, html = '' } = {}) {
+    const saveBtn = document.getElementById('saveTargetsBtn');
+    if (!saveBtn) return;
+    saveBtn.disabled = loading;
+    saveBtn.style.opacity = loading ? '0.75' : '';
+    saveBtn.style.cursor = loading ? 'wait' : '';
+    if (html) saveBtn.innerHTML = html;
+}
+
+function applySharePointSyncResultToState(selectedIds) {
+    const selected = new Set((selectedIds || []).map(item => String(item)));
+    currentTargetContext.targets = (currentTargetContext.targets || []).map(target => {
+        if (!selected.has(String(target.id || ''))) return target;
+        return {
+            ...target,
+            configured: true,
+            enabled: true,
+        };
+    });
+    currentTargetContext.filteredTargets = (currentTargetContext.filteredTargets || []).map(target => {
+        if (!selected.has(String(target.id || ''))) return target;
+        return {
+            ...target,
+            configured: true,
+            enabled: true,
+        };
+    });
+}
+
+function estimateTargetSizeByButton(button) {
+    if (!button) return;
+    estimateTargetSize(button.dataset.targetId || '');
+}
+
+function updateTargetEstimateInState(targetId, result) {
+    const updateOne = (target) => {
+        if (String(target.id || '') !== String(targetId || '')) return target;
+        return {
+            ...target,
+            size_bytes: result.size_bytes,
+            size_human: result.size_human,
+            size_confidence: result.size_confidence,
+            size_updated_at: result.size_updated_at,
+            size_status: 'cached',
+        };
+    };
+    currentTargetContext.targets = (currentTargetContext.targets || []).map(updateOne);
+    currentTargetContext.filteredTargets = (currentTargetContext.filteredTargets || []).map(updateOne);
+}
+
+async function estimateTargetSize(targetId, { quiet = false } = {}) {
+    const target = (currentTargetContext.targets || []).find(item => String(item.id || '') === String(targetId || ''));
+    if (!target) return;
+    const sizeCell = document.getElementById(`targetSize-${targetId}`);
+    if (sizeCell) {
+        sizeCell.innerHTML = '<strong style="color:var(--text-muted);">Estimating...</strong><div style="font-size:10px;color:var(--text-dim);margin-top:3px;">Reading Graph quota</div>';
+    }
+    try {
+        const result = await apiCall('/api/workloads/sharepoint/target-estimate', 'POST', {
+            id: target.id,
+            graph_id: target.graph_id,
+            path: target.path,
+        });
+        if (result.error) throw new Error(result.error);
+        updateTargetEstimateInState(targetId, result);
+        refreshTargetsView();
+    } catch (e) {
+        if (sizeCell) {
+            sizeCell.innerHTML = `<strong style="color:var(--danger);">Unknown</strong><div style="font-size:10px;color:var(--text-dim);margin-top:3px;" title="${escapeAttr(e.message || String(e))}">Estimate failed</div>`;
+        }
+        if (!quiet) {
+            showToast(`Failed to estimate target size: ${e.message || e}`, 'error');
+        }
+        throw e;
+    }
+}
+
+async function estimateTargetsBatch(targets, { quiet = false } = {}) {
+    const list = Array.isArray(targets) ? targets.filter(Boolean) : [];
+    if (!list.length) {
+        return { estimated: 0, failed: 0, results: [] };
+    }
+    const payload = {
+        targets: list.map(target => ({
+            id: target.id,
+            graph_id: target.graph_id,
+            path: target.path,
+        })),
+    };
+    const queued = await apiCall('/api/workloads/sharepoint/target-estimates', 'POST', payload);
+    if (queued.error) throw new Error(queued.error);
+    let result = queued;
+    while (result.status === 'queued') {
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        const state = await apiCall(`/api/estimates/status/${encodeURIComponent(queued.task_id)}`);
+        if (state.state === 'FAILURE') throw new Error(state.error || 'Estimate job failed');
+        if (state.state === 'SUCCESS') result = state.result;
+    }
+    if (result.error) {
+        throw new Error(result.error);
+    }
+    (result.results || []).forEach(item => {
+        if (item.status === 'estimated') {
+            updateTargetEstimateInState(item.target_id || item.graph_id || item.path, item);
+        }
+    });
+    refreshTargetsView();
+    if (!quiet && result.failed) {
+        showToast(`Estimated ${result.estimated || 0} target(s), failed ${result.failed || 0}.`, 'warning');
+    }
+    return result;
+}
+
+async function estimateVisibleUnknownTargets(options = {}) {
+    if (currentTargetContext.workload !== 'sharepoint') return;
+    const {
+        silent = false,
+        confirmBatch = !silent,
+        limit = 25,
+        concurrency = 3,
+        auto = false,
+    } = options;
+    if (targetsAutoEstimateInFlight) return;
+    syncCurrentSelectionFromDom();
+    const unknownTargets = (currentTargetContext.filteredTargets || [])
+        .filter(target => (target.size_status || 'unknown') !== 'cached')
+        .slice(0, limit);
+    if (!unknownTargets.length) {
+        if (!silent) showToast('No unknown visible targets to estimate.', 'info');
+        return;
+    }
+    if (confirmBatch && !confirm(`Estimate size for ${unknownTargets.length} visible unknown target(s)?\\n\\nThis calls Microsoft Graph per target and may take a moment.`)) return;
+
+    targetsAutoEstimateInFlight = true;
+    if (!silent) {
+        renderTargetBanner(`
+            <div style="background:rgba(6,182,212,0.10);border:1px solid rgba(6,182,212,0.24);border-radius:12px;padding:14px;color:var(--text-muted);font-size:13px;line-height:1.7;">
+                <div style="font-weight:800;color:var(--accent);margin-bottom:6px;"><i class="bi bi-calculator"></i> Estimating SharePoint storage</div>
+                Reading Microsoft Graph quota for <b>${unknownTargets.length}</b> visible target(s). This helps you decide which sites should be added into backup scope.
+            </div>`);
+        scrollTargetsModalToTop();
+    }
+
+    try {
+        let completed = 0;
+        let failed = 0;
+        for (let index = 0; index < unknownTargets.length; index += Math.max(1, concurrency)) {
+            const chunk = unknownTargets.slice(index, index + Math.max(1, concurrency));
+            const batch = await estimateTargetsBatch(chunk, { quiet: true });
+            completed += Number(batch.estimated || 0);
+            failed += Number(batch.failed || 0);
+        }
+        const remainingUnknown = (currentTargetContext.targets || []).filter(
+            target => (target.size_status || 'unknown') !== 'cached'
+        ).length;
+        if (!silent) {
+            renderTargetBanner(`
+                <div style="background:rgba(16,185,129,0.10);border:1px solid rgba(16,185,129,0.24);border-radius:12px;padding:14px;color:var(--text-muted);font-size:13px;line-height:1.7;">
+                    <div style="font-weight:800;color:var(--success);margin-bottom:6px;"><i class="bi bi-check-circle-fill"></i> SharePoint size estimation completed</div>
+                    Estimated <b>${completed}</b> target(s)${failed ? `, failed <b>${failed}</b>` : ''}. Remaining unknown targets in this tenant: <b>${remainingUnknown}</b>.
+                </div>`);
+            scrollTargetsModalToTop();
+            showToast(`Estimated ${completed} visible target(s).${failed ? ` Failed: ${failed}.` : ''}`, failed ? 'warning' : 'success');
+        } else if (!auto && failed) {
+            showToast(`Estimated ${completed} target(s), failed ${failed}.`, 'warning');
+        }
+    } finally {
+        targetsAutoEstimateInFlight = false;
+    }
 }
 
 async function loadTargets(workload, mode = 'view') {
@@ -519,7 +878,10 @@ async function loadTargets(workload, mode = 'view') {
     document.getElementById('targetsList').innerHTML = 'Loading...';
     document.getElementById('targetsSelectionControls').style.display = 'none';
     document.getElementById('targetsSelectionControls').innerHTML = '';
+    document.getElementById('targetsToolbar').style.display = 'none';
+    document.getElementById('targetsToolbar').innerHTML = '';
     document.getElementById('saveTargetsBtn').style.display = 'none';
+    document.getElementById('saveTargetsBtn').disabled = false;
     renderTargetBanner('');
     openTargetsModal();
 
@@ -533,6 +895,9 @@ async function loadTargets(workload, mode = 'view') {
             selection,
             targets: res.targets || [],
             mode,
+            filteredTargets: [],
+            search: '',
+            filterKind: workload === 'sharepoint' ? 'standard' : 'all',
         };
 
         if (res.error) {
@@ -572,7 +937,7 @@ async function loadTargets(workload, mode = 'view') {
                     This list is for discovery only. The actual SharePoint backup scope still follows the enabled site list from
                     <a href="${escapeAttr(meta.manage_href || '/sites')}" style="color:var(--accent);font-weight:700;">${escapeHtml(meta.manage_label || 'Sites')}</a>.
                 </div>`);
-            renderTargetsTable(workload, currentTargetContext.targets, selection, false);
+            refreshTargetsView();
             return;
         }
 
@@ -581,12 +946,22 @@ async function loadTargets(workload, mode = 'view') {
                 <div style="background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.22);border-radius:12px;padding:14px;color:var(--text-muted);font-size:13px;line-height:1.7;">
                     Discovered SharePoint sites can be synced directly into the backup Sites registry from here. This removes the need to add site paths manually one by one.
                     For safety, saving here adds or re-enables the selected sites and keeps unrelated existing site entries unchanged.
+                    Size shown here is a Graph-based backup data estimate and may differ from SharePoint Admin Center storage totals.
                 </div>`);
             renderSharePointSelectionControls(selection, currentTargetContext.targets);
-            renderTargetsTable(workload, currentTargetContext.targets, selection, true);
+            refreshTargetsView();
             const saveBtn = document.getElementById('saveTargetsBtn');
             saveBtn.style.display = 'inline-flex';
-            saveBtn.innerHTML = '<i class="bi bi-cloud-arrow-down"></i> Add Selected to Backup Sites';
+            updateSaveTargetsButtonLabel();
+            window.setTimeout(() => {
+                estimateVisibleUnknownTargets({
+                    silent: true,
+                    confirmBatch: false,
+                    limit: 10,
+                    concurrency: 3,
+                    auto: true,
+                });
+            }, 150);
             return;
         }
 
@@ -595,7 +970,7 @@ async function loadTargets(workload, mode = 'view') {
                 <div style="background:rgba(6,182,212,0.08);border:1px solid rgba(6,182,212,0.22);border-radius:12px;padding:14px;color:var(--text-muted);font-size:13px;line-height:1.7;">
                     This is a read-only target list. Open <b>Configure Scope</b> if you want to choose which targets are included in the modern backup run.
                 </div>`);
-            renderTargetsTable(workload, currentTargetContext.targets, selection, false);
+            refreshTargetsView();
             document.getElementById('targetsSelectionControls').style.display = 'none';
             document.getElementById('saveTargetsBtn').style.display = 'none';
             return;
@@ -606,44 +981,95 @@ async function loadTargets(workload, mode = 'view') {
                 Save target scope here to limit what this workload processes during a modern backup run. If the mode stays on <b>All</b>, the backend will use every discovered target.
             </div>`);
         renderTargetSelectionControls(selection, currentTargetContext.targets);
-        renderTargetsTable(workload, currentTargetContext.targets, selection, true);
+        refreshTargetsView();
         const saveBtn = document.getElementById('saveTargetsBtn');
         saveBtn.style.display = 'inline-flex';
-        saveBtn.innerHTML = '<i class="bi bi-save"></i> Save Target Scope';
+        updateSaveTargetsButtonLabel();
     } catch (e) {
         document.getElementById('targetsList').innerHTML = `<div style="color:var(--danger);">Error: ${escapeHtml(e.message || String(e))}</div>`;
     }
 }
 
 async function saveTargetSelection() {
-    if (!currentTargetContext.workload || !currentTargetContext.supportsSelection) return;
+    const isSharePointSync = currentTargetContext.workload === 'sharepoint';
+    if (!currentTargetContext.workload || (!currentTargetContext.supportsSelection && !isSharePointSync)) return;
+    syncCurrentSelectionFromDom();
     const modeEl = document.querySelector('input[name="selectionMode"]:checked');
-    const mode = currentTargetContext.workload === 'sharepoint' ? 'selected' : (modeEl ? modeEl.value : 'all');
-    const selectedIds = Array.from(document.querySelectorAll('.target-check:checked')).map(el => el.value);
+    const mode = isSharePointSync ? 'selected' : (modeEl ? modeEl.value : 'all');
+    const selectedIds = Array.from(new Set((currentTargetContext.selection.selected_ids || []).map(item => String(item))));
 
     if (mode === 'selected' && !selectedIds.length) {
-        showToast(currentTargetContext.workload === 'sharepoint'
+        showToast(isSharePointSync
             ? 'Select at least one SharePoint site to sync into backup.'
             : 'Select at least one target or switch back to All Targets.', 'warning');
         return;
     }
 
+    updateSaveTargetsButtonLabel();
+    const defaultButtonHtml = isSharePointSync
+        ? document.getElementById('saveTargetsBtn').innerHTML
+        : '<i class="bi bi-save"></i> Save Target Scope';
+
     try {
+        if (isSharePointSync) {
+            const selectedUnknownTargets = (currentTargetContext.targets || []).filter(target => {
+                const isSelected = selectedIds.includes(String(target.id || ''));
+                const isUnknown = (target.size_status || 'unknown') !== 'cached';
+                return isSelected && isUnknown;
+            }).slice(0, 25);
+            renderTargetBanner(`
+                <div style="background:rgba(6,182,212,0.10);border:1px solid rgba(6,182,212,0.24);border-radius:12px;padding:14px;color:var(--text-muted);font-size:13px;line-height:1.7;">
+                    <div style="font-weight:800;color:var(--accent);margin-bottom:6px;"><i class="bi bi-arrow-repeat"></i> Syncing selected SharePoint sites</div>
+                    Adding or re-enabling <b>${selectedIds.length}</b> selected site(s) in the backup Sites registry...
+                    ${selectedUnknownTargets.length ? `<div style="margin-top:6px;">Estimating up to <b>${selectedUnknownTargets.length}</b> selected site(s) first so the Sites registry also stores backup data size.</div>` : ''}
+                </div>`);
+            scrollTargetsModalToTop();
+            if (selectedUnknownTargets.length) {
+                await estimateTargetsBatch(selectedUnknownTargets, { quiet: true });
+            }
+        }
+        setSaveTargetsButtonState({
+            loading: true,
+            html: isSharePointSync
+                ? '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Adding to Backup Sites...'
+                : '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Saving Target Scope...'
+        });
         const res = await apiCall(`/api/workloads/${currentTargetContext.workload}/selection`, 'POST', {
             mode,
             selected_ids: selectedIds,
         });
         if (res.error) throw new Error(res.error);
         currentTargetContext.selection = res.selection || { mode: 'all', selected_ids: [] };
-        renderSelectionSummary(currentTargetContext.workload, currentTargetContext.selection, currentTargetContext.targets.length);
-        if (currentTargetContext.workload === 'sharepoint') {
+        if (isSharePointSync) {
             const sync = res.site_sync || {};
+            sharePointSiteSelection = Array.from(new Set(currentTargetContext.selection.selected_ids || []));
+            applySharePointSyncResultToState(selectedIds);
+            renderSharePointSelectionControls(currentTargetContext.selection, currentTargetContext.targets);
+            renderSelectionSummary('sharepoint', { mode: 'selected', selected_ids: sharePointSiteSelection }, currentTargetContext.targets.length);
+            renderTargetBanner(`
+                <div style="background:rgba(16,185,129,0.10);border:1px solid rgba(16,185,129,0.28);border-radius:12px;padding:14px;color:var(--text-muted);font-size:13px;line-height:1.7;">
+                    <div style="font-weight:800;color:var(--success);margin-bottom:6px;"><i class="bi bi-check-circle-fill"></i> SharePoint backup site registry updated</div>
+                    Added <b>${sync.added || 0}</b>, re-enabled <b>${sync.reenabled || 0}</b>, updated <b>${sync.updated || 0}</b>, selected <b>${sync.total_selected || selectedIds.length}</b>.
+                    The selected rows now follow the backup Sites registry and are ready to be included in normal SharePoint backup runs.
+                </div>`);
+            refreshTargetsView();
+            updateSaveTargetsButtonLabel();
+            scrollTargetsModalToTop();
             showToast(`Synced SharePoint sites: added ${sync.added || 0}, re-enabled ${sync.reenabled || 0}, updated ${sync.updated || 0}`, 'success');
         } else {
+            renderSelectionSummary(currentTargetContext.workload, currentTargetContext.selection, currentTargetContext.targets.length);
             showToast(`Saved target scope for ${workloadMeta[currentTargetContext.workload]?.name || currentTargetContext.workload}`, 'success');
         }
     } catch (e) {
+        renderTargetBanner(`
+            <div style="background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.24);border-radius:12px;padding:14px;color:var(--text-muted);font-size:13px;line-height:1.7;">
+                <div style="font-weight:800;color:var(--danger);margin-bottom:6px;"><i class="bi bi-x-circle-fill"></i> Failed to update backup site registry</div>
+                ${escapeHtml(e.message || String(e))}
+            </div>`);
         showToast('Failed to save target scope: ' + e.message, 'error');
+    } finally {
+        setSaveTargetsButtonState({ loading: false, html: defaultButtonHtml });
+        updateSaveTargetsButtonLabel();
     }
 }
 

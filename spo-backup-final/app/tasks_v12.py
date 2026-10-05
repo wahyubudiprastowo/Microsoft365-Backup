@@ -18,9 +18,6 @@ def register_tenant_schedules(celery_app):
         log.warning(f"Tenant schedule migration skipped: {e}")
 
     schedules = sm.list_enabled_schedules()
-    if not schedules:
-        return []
-
     existing = dict(getattr(celery_app.conf, "beat_schedule", {}) or {})
     existing = {
         key: value
@@ -51,8 +48,22 @@ def register_tenant_schedules(celery_app):
         }
         registered.append(task_name)
 
-    if registered and "scheduled-backup" in existing:
-        del existing["scheduled-backup"]
+    if registered:
+        existing.pop("scheduled-backup", None)
+    else:
+        from app.config_manager import load_config
+
+        global_schedule = load_config().get("schedule", {})
+        if global_schedule.get("enabled"):
+            parts = str(global_schedule.get("cron_expression") or "0 2 * * *").split()
+            if len(parts) == 5:
+                existing["scheduled-backup"] = {
+                    "task": "app.tasks.run_backup_task",
+                    "schedule": crontab(minute=parts[0], hour=parts[1], day_of_month=parts[2],
+                                        month_of_year=parts[3], day_of_week=parts[4]),
+                }
+        else:
+            existing.pop("scheduled-backup", None)
 
     celery_app.conf.beat_schedule = existing
     if registered:

@@ -95,6 +95,7 @@ async function saveCfg() {
         const res = await apiCall('/api/config', 'POST', cfg);
         if (res.status === 'saved') {
             showToast('Advanced configuration saved', 'success');
+            await loadCfg();
         } else {
             showToast(res.error || 'Failed', 'error');
         }

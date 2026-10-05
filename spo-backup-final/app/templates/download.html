@@ -240,17 +240,26 @@ function pollDownloadStatus(taskId) {
     pollInterval = setInterval(async () => {
         try {
             const data = await apiCall(`/api/download/status/${taskId}`);
-            updateProgressUI(data);
-            updateControlUI(data.control_state || 'running');
+            if (data.state === 'PROGRESS' || data.state === 'STARTED') {
+                updateProgressUI(data);
+                updateControlUI(data.control_state || 'running');
+            }
             if (data.state === 'SUCCESS') {
                 clearInterval(pollInterval);
                 localStorage.removeItem(DOWNLOAD_TASK_STORAGE_KEY);
-                document.getElementById('progressState').textContent = 'COMPLETED';
-                document.getElementById('progressState').className = 'badge-modern badge-success';
                 const r = data.result || {};
+                const finalStatus = r.cancelled ? 'cancelled' : (r.status || 'success');
+                const badge = document.getElementById('progressState');
+                badge.textContent = finalStatus === 'success' ? 'COMPLETED' : finalStatus.toUpperCase();
+                badge.className = finalStatus === 'success' ? 'badge-modern badge-success'
+                    : (finalStatus === 'partial' || finalStatus === 'cancelled' ? 'badge-modern badge-warning' : 'badge-modern badge-danger');
+                document.getElementById('overallPctText').textContent = '100%';
+                document.getElementById('overallProgressBar').style.width = '100%';
                 const parts = [`${r.downloaded || 0} downloaded`, `${r.skipped || 0} skipped`];
                 if (r.resumed) parts.push(`${r.resumed} resumed`);
-                showToast(`Done! ${parts.join(', ')} · ${formatBytes(r.bytes || 0)}`, 'success');
+                if (r.errors && r.errors.length) parts.push(`${r.errors.length} failed`);
+                showToast(`${badge.textContent}: ${parts.join(', ')} · ${formatBytes(r.bytes || 0)}`,
+                    finalStatus === 'success' ? 'success' : 'warning');
                 resetDownloadBtn();
             }
             if (data.state === 'FAILURE' || data.state === 'REVOKED' || data.state === 'UNKNOWN') {

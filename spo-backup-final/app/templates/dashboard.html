@@ -211,7 +211,7 @@ function deriveProgressSpeed(meta, taskId, filesPerSecond, isPaused, skippedOnly
     const explicitSpeed = String(meta.speed_human || '').trim();
     if (explicitSpeed && explicitSpeed !== '0 B/s') return explicitSpeed;
 
-    const bytesDone = Number(meta.bytes_done ?? meta.bytes_downloaded ?? 0);
+    const bytesDone = Number(meta.transfer_bytes_done ?? meta.bytes_downloaded ?? meta.bytes_done ?? 0);
     const bytesTotal = Number(meta.bytes_total ?? 0);
     if (bytesDone > 0 || bytesTotal > 0) {
         const sampleKey = taskId || currentBackupTaskId || 'dashboard';
@@ -308,9 +308,9 @@ function hydrateProgressPanel(meta, controlState = 'running', taskId = currentBa
     const pct = Number(m.overall_pct || 0);
     const skippedOnly = !isPaused && Number(m.files_skipped || 0) > 0 && Number(m.files_downloaded || 0) === 0 && Number(m.files_resumed || 0) === 0;
     const elapsed = Number(m.elapsed || 0);
-    const bytesDone = Number(m.bytes_done ?? m.bytes_downloaded ?? 0);
+    const bytesDone = Number(m.bytes_done ?? 0);
     const bytesTotal = Number(m.bytes_total ?? 0);
-    const liveSizeBytes = Number(m.live_size_bytes || 0);
+    const liveSizeBytes = Number(m.bytes_stored ?? m.live_size_bytes ?? 0);
     const remainingFiles = Math.max(progressTotal - progressDone, 0);
     const remainingBytes = Math.max(bytesTotal - bytesDone, 0);
     const filesPerSecond = elapsed > 0 ? (progressDone / elapsed) : 0;
@@ -331,7 +331,7 @@ function hydrateProgressPanel(meta, controlState = 'running', taskId = currentBa
     document.getElementById('bFilesSkipped').textContent = (m.files_skipped || 0).toLocaleString();
     document.getElementById('bFilesResumed').textContent = (m.files_resumed || 0).toLocaleString();
     document.getElementById('bLiveSize').textContent = formatBytes(remainingBytes);
-    document.getElementById('bLiveSizeHint').textContent = `Stored so far: ${m.live_size_human || formatBytes(liveSizeBytes || bytesDone)}`;
+    document.getElementById('bLiveSizeHint').textContent = `Stored so far: ${m.live_size_human || formatBytes(liveSizeBytes || 0)}`;
     document.getElementById('bCurrentFile').textContent = displayCurrentFile;
     document.getElementById('bOverallPct').textContent = pct + '%';
     document.getElementById('bProgressBar').style.width = pct + '%';

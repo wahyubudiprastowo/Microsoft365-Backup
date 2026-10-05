@@ -30,8 +30,8 @@ def build_retry_session(
     pool_maxsize: int | None = None,
     allowed_methods: Iterable[str] | None = None,
 ) -> requests.Session:
-    pool_connections = int(pool_connections or os.environ.get("HTTP_POOL_CONNECTIONS", "64"))
-    pool_maxsize = int(pool_maxsize or os.environ.get("HTTP_POOL_MAXSIZE", "64"))
+    pool_connections = int(pool_connections or os.environ.get("HTTP_POOL_CONNECTIONS", "128"))
+    pool_maxsize = int(pool_maxsize or os.environ.get("HTTP_POOL_MAXSIZE", "128"))
     retry = Retry(
         total=total,
         connect=connect,

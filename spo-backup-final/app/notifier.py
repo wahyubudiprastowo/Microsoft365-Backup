@@ -127,6 +127,12 @@ class NotificationDispatcher:
             return self._format_size(bytes_dl / secs) + "/s"
         except: return "N/A"
 
+    def _report_size_bytes(self, stats):
+        try:
+            return int(stats.get("bytes_stored") or stats.get("bytes_downloaded") or 0)
+        except Exception:
+            return 0
+
     def _format_time(self, time_str):
         try:
             if not time_str: return "N/A"
@@ -143,7 +149,7 @@ class NotificationDispatcher:
         ok = not s.get("failed_sites")
         duration = self._calc_duration(s)
         speed = self._calc_speed(s)
-        size = self._format_size(s.get("bytes_downloaded", 0))
+        size = self._format_size(self._report_size_bytes(s))
         msg = (
             f"{'🟢' if ok else '🔴'} <b>SharePoint Backup Report</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -178,7 +184,7 @@ class NotificationDispatcher:
             {"name": "Sites", "value": f"{s.get('successful_sites',0)}/{s.get('total_sites',0)}"},
             {"name": "Files Downloaded", "value": f"{s.get('files_downloaded',0):,}"},
             {"name": "Files Skipped", "value": f"{s.get('files_skipped',0):,}"},
-            {"name": "Total Size", "value": self._format_size(s.get('bytes_downloaded', 0))},
+            {"name": "Total Size", "value": self._format_size(self._report_size_bytes(s))},
         ]
         sections = [{
             "activityTitle": "📦 SharePoint Backup Report",
@@ -206,7 +212,7 @@ class NotificationDispatcher:
             f"[Microsoft 365 Backup] "
             f"{'SUCCESS ✅' if ok else 'PARTIAL FAILURE ⚠️'} — "
             f"{s.get('successful_sites', 0)}/{s.get('total_sites', 0)} sites, "
-            f"{self._format_size(s.get('bytes_downloaded', 0))} — "
+            f"{self._format_size(self._report_size_bytes(s))} — "
             f"{datetime.now().strftime('%Y-%m-%d %H:%M')}"
         )
         html = self._build_html(s)
@@ -251,7 +257,7 @@ class NotificationDispatcher:
 
         duration = self._calc_duration(s)
         avg_speed = self._calc_speed(s)
-        size = self._format_size(s.get("bytes_downloaded", 0))
+        size = self._format_size(self._report_size_bytes(s))
         start_str = self._format_time(s.get("start_time"))
         end_str = self._format_time(s.get("end_time"))
 

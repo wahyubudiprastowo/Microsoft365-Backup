@@ -12,6 +12,11 @@ import logging
 import msal
 import requests
 import time
+import hashlib
+import re
+import threading
+import uuid
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse, unquote
@@ -26,10 +31,16 @@ from app.http_utils import (
 )
 
 log = logging.getLogger("spo_backup")
-STREAM_CHUNK_SIZE = max(65536, int(os.environ.get("GRAPH_DOWNLOAD_CHUNK_SIZE", "4194304")))
+STREAM_CHUNK_SIZE = max(65536, int(os.environ.get("GRAPH_DOWNLOAD_CHUNK_SIZE", "8388608")))
 GRAPH_LIST_PAGE_SIZE = min(999, max(50, int(os.environ.get("GRAPH_LIST_PAGE_SIZE", "999"))))
-MANIFEST_FLUSH_EVERY = max(1, int(os.environ.get("BACKUP_MANIFEST_FLUSH_EVERY", "25")))
-MANIFEST_FLUSH_INTERVAL = max(1.0, float(os.environ.get("BACKUP_MANIFEST_FLUSH_INTERVAL", "5")))
+MANIFEST_FLUSH_EVERY = max(1, int(os.environ.get("BACKUP_MANIFEST_FLUSH_EVERY", "100")))
+MANIFEST_FLUSH_INTERVAL = max(1.0, float(os.environ.get("BACKUP_MANIFEST_FLUSH_INTERVAL", "10")))
+DOWNLOAD_RANGE_WORKERS = min(8, max(1, int(os.environ.get("GRAPH_DOWNLOAD_RANGE_WORKERS", "4"))))
+DOWNLOAD_RANGE_MIN_SIZE = max(8 * 1024 * 1024, int(os.environ.get("GRAPH_DOWNLOAD_RANGE_MIN_SIZE", str(64 * 1024 * 1024))))
+
+
+class IncompleteDownloadError(Exception):
+    pass
 
 
 class GraphAuth:
@@ -63,6 +74,7 @@ class ProgressTracker:
         self.pause_time = 0  # Track time spent paused (for accurate speed)
         self.bytes_total = 0
         self.bytes_done = 0
+        self.transfer_bytes_done = 0
         self.files_total = 0
         self.files_done = 0
         self.current_file = ""
@@ -78,6 +90,7 @@ class ProgressTracker:
     def file_chunk(self, b):
         self.current_file_done += b
         self.bytes_done += b
+        self.transfer_bytes_done += b
 
     def file_done(self):
         self.files_done += 1
@@ -108,7 +121,7 @@ class ProgressTracker:
     @property
     def speed_bps(self):
         active_time = time.time() - self.start_time - self.pause_time
-        return self.bytes_done / active_time if active_time > 0.1 else 0
+        return self.transfer_bytes_done / active_time if active_time > 0.1 else 0
 
     @property
     def speed_human(self):
@@ -160,6 +173,7 @@ class ProgressTracker:
             "current_file_done": self.current_file_done,
             "bytes_done": self.bytes_done,
             "bytes_total": self.bytes_total,
+            "transfer_bytes_done": self.transfer_bytes_done,
             "files_done": self.files_done,
             "files_total": self.files_total,
             "speed_human": self.speed_human,
@@ -210,6 +224,7 @@ class BackupEngine:
         self.stats = {
             "total_sites": 0, "successful_sites": 0, "failed_sites": [],
             "files_downloaded": 0, "files_skipped": 0, "bytes_downloaded": 0,
+            "bytes_stored": 0,
             "files_resumed": 0,
             "errors": [], "start_time": None, "end_time": None,
             "current_site": "", "cancelled": False,
@@ -295,20 +310,30 @@ class BackupEngine:
             self._emit("cancelled")
             raise
 
-    def _download(self, url, dest, size_hint=0, auth_required: bool = True):
+    def _download(self, url, dest, size_hint=0, auth_required: bool = True, source_identity: str = ""):
         """Download with progress + pause/resume support."""
-        # ── NEW: Resume support — skip if file already exists with same size
-        if os.path.exists(dest) and size_hint > 0:
-            existing_size = os.path.getsize(dest)
-            if existing_size == size_hint:
-                log.info(f"Skip existing: {os.path.basename(dest)}")
-                self.progress.bytes_done += size_hint
-                self.progress.files_done += 1
-                return {"bytes_written": size_hint, "skipped": True, "resumed": False}
-
+        self.progress.file_start(os.path.basename(dest), size_hint or 0)
         os.makedirs(os.path.dirname(dest), exist_ok=True)
         tmp = dest + ".tmp"
-        self.progress.file_start(os.path.basename(dest), size_hint or 0)
+        tmp_meta = dest + ".tmp.meta"
+        if os.path.exists(tmp):
+            try:
+                with open(tmp_meta) as handle:
+                    stored_identity = json.load(handle).get("source_identity")
+            except (OSError, ValueError):
+                stored_identity = None
+            if not source_identity or stored_identity != source_identity:
+                os.remove(tmp)
+        if source_identity:
+            with open(tmp_meta, "w") as handle:
+                json.dump({"source_identity": source_identity}, handle)
+
+        if size_hint >= DOWNLOAD_RANGE_MIN_SIZE and DOWNLOAD_RANGE_WORKERS > 1 and not os.path.exists(tmp):
+            parallel = self._download_parallel_ranges(url, dest, size_hint, auth_required)
+            if parallel is not None:
+                if os.path.exists(tmp_meta):
+                    os.remove(tmp_meta)
+                return parallel
 
         last_error = None
         for attempt in range(5):
@@ -323,12 +348,11 @@ class BackupEngine:
                     except OSError:
                         resume_from = 0
                     if size_hint and resume_from >= size_hint:
-                        os.replace(tmp, dest)
-                        self.progress.sync_current_file_progress(size_hint)
-                        self.progress.file_done()
-                        return {"bytes_written": size_hint, "skipped": True, "resumed": False}
+                        os.remove(tmp)
+                        resume_from = 0
                     if resume_from > 0:
                         headers["Range"] = f"bytes={resume_from}-"
+                headers["Accept-Encoding"] = "identity"
 
                 response = self.session.get(url, headers=headers, stream=True, timeout=(20, 300))
                 if is_retryable_status(response.status_code) and attempt < 4:
@@ -341,6 +365,10 @@ class BackupEngine:
                     time.sleep(delay)
                     continue
                 response.raise_for_status()
+                if response.status_code == 206:
+                    match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+|\*)", response.headers.get("Content-Range", ""))
+                    if not match or int(match.group(1)) != resume_from:
+                        raise IncompleteDownloadError("Invalid Content-Range from download server")
 
                 total_size = int(response.headers.get("content-length", size_hint or 0))
                 if resume_from and response.status_code == 206 and size_hint:
@@ -369,9 +397,23 @@ class BackupEngine:
                         self.progress.file_chunk(sz)
                         self._emit("file_progress")
 
+                expected_body = response.headers.get("Content-Length")
+                if expected_body and bytes_written - resume_from != int(expected_body):
+                    raise IncompleteDownloadError(f"Received {bytes_written - resume_from} bytes, expected {expected_body}")
+                if size_hint and bytes_written != size_hint:
+                    raise IncompleteDownloadError(f"Downloaded {bytes_written} bytes, expected {size_hint}")
+
                 os.replace(tmp, dest)
+                if os.path.exists(tmp_meta):
+                    os.remove(tmp_meta)
+                response.close()
                 self.progress.file_done()
-                return {"bytes_written": bytes_written, "skipped": False, "resumed": resume_from > 0}
+                return {
+                    "transferred_bytes": max(0, bytes_written - resume_from),
+                    "final_size": bytes_written,
+                    "skipped": False,
+                    "resumed": resume_from > 0,
+                }
             except Exception as e:
                 last_error = e
                 if response is not None:
@@ -381,7 +423,7 @@ class BackupEngine:
                         pass
                 if isinstance(e, PauseException):
                     raise
-                if not is_retryable_exception(e) or attempt == 4:
+                if not (is_retryable_exception(e) or isinstance(e, IncompleteDownloadError)) or attempt == 4:
                     raise
                 try:
                     local_size = os.path.getsize(tmp) if os.path.exists(tmp) else 0
@@ -398,6 +440,104 @@ class BackupEngine:
         if last_error:
             raise last_error
         raise RuntimeError(f"Download failed for {dest}")
+
+    def _download_parallel_ranges(self, url, dest, size_hint, auth_required):
+        headers = self._headers() if auth_required else {}
+        headers["Accept-Encoding"] = "identity"
+        probe = None
+        try:
+            probe = self.session.get(
+                url, headers={**headers, "Range": "bytes=0-0"}, stream=True, timeout=(20, 30)
+            )
+            match = re.fullmatch(r"bytes 0-0/(\d+)", probe.headers.get("Content-Range", ""))
+            if probe.status_code != 206 or not match or int(match.group(1)) != size_hint:
+                return None
+        except requests.RequestException as exc:
+            log.info("Range probe unavailable for %s: %s", os.path.basename(dest), exc)
+            return None
+        finally:
+            if probe is not None:
+                probe.close()
+
+        scratch = dest + ".parallel." + uuid.uuid4().hex
+        workers = min(DOWNLOAD_RANGE_WORKERS, max(1, size_hint // (8 * 1024 * 1024)))
+        block = (size_hint + workers - 1) // workers
+        stop = threading.Event()
+        progress_lock = threading.Lock()
+        fd = None
+
+        def fetch_range(start, end):
+            session = build_retry_session(total=0, connect=0, read=0, status=0)
+            response = None
+            try:
+                self._check_control()
+                response = session.get(
+                    url, headers={**headers, "Range": f"bytes={start}-{end}"},
+                    stream=True, timeout=(20, 300),
+                )
+                expected_range = f"bytes {start}-{end}/{size_hint}"
+                if response.status_code != 206 or response.headers.get("Content-Range") != expected_range:
+                    raise IncompleteDownloadError(f"Server did not honor range {start}-{end}")
+                position = start
+                for chunk in response.iter_content(chunk_size=STREAM_CHUNK_SIZE):
+                    if stop.is_set():
+                        raise IncompleteDownloadError("Parallel download stopped")
+                    self._check_control()
+                    if position + len(chunk) > end + 1:
+                        raise IncompleteDownloadError("Range response exceeded requested size")
+                    written = 0
+                    while written < len(chunk):
+                        count = os.pwrite(fd, chunk[written:], position + written)
+                        if count <= 0:
+                            raise OSError("Parallel download write made no progress")
+                        written += count
+                    position += len(chunk)
+                    with progress_lock:
+                        self.progress.file_chunk(len(chunk))
+                if position != end + 1:
+                    raise IncompleteDownloadError(f"Range ended at {position}, expected {end + 1}")
+            finally:
+                if response is not None:
+                    response.close()
+                session.close()
+
+        try:
+            fd = os.open(scratch, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+            os.ftruncate(fd, size_hint)
+            ranges = [(start, min(start + block - 1, size_hint - 1)) for start in range(0, size_hint, block)]
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                pending = {pool.submit(fetch_range, start, end) for start, end in ranges}
+                try:
+                    while pending:
+                        completed, pending = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
+                        for future in completed:
+                            future.result()
+                        self._check_control()
+                        self._emit("file_progress")
+                except Exception:
+                    stop.set()
+                    raise
+            os.close(fd)
+            fd = None
+            if os.path.getsize(scratch) != size_hint:
+                raise IncompleteDownloadError("Parallel download size mismatch")
+            os.replace(scratch, dest)
+            self.progress.file_done()
+            return {"transferred_bytes": size_hint, "final_size": size_hint, "skipped": False, "resumed": False}
+        except PauseException:
+            raise
+        except Exception as exc:
+            log.warning("Parallel transfer unavailable for %s, retrying serially: %s", os.path.basename(dest), exc)
+            self.progress.sync_current_file_progress(0)
+            return None
+        finally:
+            if fd is not None:
+                os.close(fd)
+            if os.path.exists(scratch):
+                try:
+                    os.remove(scratch)
+                except OSError:
+                    log.warning("Could not remove parallel scratch file: %s", scratch)
 
     def _emit(self, event, extra=None):
         now = time.time()
@@ -448,7 +588,7 @@ class BackupEngine:
             total_size = 0
             for root, _, files in os.walk(backup_dir):
                 for filename in files:
-                    if filename.endswith(".tmp"):
+                    if filename.endswith((".tmp", ".tmp.meta")) or ".parallel." in filename:
                         continue
                     try:
                         total_size += os.path.getsize(os.path.join(root, filename))
@@ -471,6 +611,7 @@ class BackupEngine:
                 "files_skipped": self.stats.get("files_skipped", 0),
                 "files_resumed": self.stats.get("files_resumed", 0),
                 "bytes_downloaded": self.stats.get("bytes_downloaded", 0),
+                "bytes_stored": self.stats.get("bytes_stored", 0),
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }
             if extra:
@@ -548,17 +689,62 @@ class BackupEngine:
 
         return str(canonical_dir), False
 
-    def _materialize_existing_file(self, source_path: str, dest_path: str) -> bool:
+    def _materialize_existing_file(self, source_path: str, dest_path: str, expected_size: int = 0) -> bool:
         if not source_path or not os.path.exists(source_path):
+            return False
+        if expected_size and os.path.getsize(source_path) != expected_size:
             return False
         os.makedirs(os.path.dirname(dest_path), exist_ok=True)
         if os.path.exists(dest_path):
-            return True
+            return not expected_size or os.path.getsize(dest_path) == expected_size
         try:
             os.link(source_path, dest_path)
         except OSError:
             shutil.copy2(source_path, dest_path)
         return True
+
+    @staticmethod
+    def _site_storage_key(name: str, site_id: str) -> str:
+        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._")[:80] or "site"
+        digest = hashlib.sha256(site_id.encode("utf-8")).hexdigest()[:12]
+        return f"{safe_name}--{digest}"
+
+    @staticmethod
+    def _safe_destination(root: str, *parts: str) -> str:
+        root_path = Path(root).resolve()
+        destination = root_path.joinpath(*parts).resolve()
+        if root_path not in destination.parents:
+            raise ValueError("Downloaded file path escapes its backup folder")
+        return str(destination)
+
+    def _site_backup_dir(self, backup_dir: str, name: str, site_id: str, site_path: str) -> tuple[str, bool]:
+        legacy = Path(backup_dir) / name.replace(" ", "_")
+        root = Path(backup_dir).resolve()
+        if (legacy.name not in {".", ".."} and not legacy.is_symlink()
+                and legacy.parent.resolve() == root and legacy.is_dir() and legacy.resolve().parent == root):
+            meta_file = legacy / "_backup_metadata.json"
+            try:
+                meta = json.loads(meta_file.read_text())
+                if meta.get("site_id") == site_id or (
+                    not meta.get("site_id")
+                    and
+                    meta.get("site_path", "").strip("/").lower() == site_path.strip("/").lower()
+                    and meta.get("site_path") is not None
+                ):
+                    return str(legacy), True
+            except (OSError, ValueError):
+                pass
+        site_dir = root / self._site_storage_key(name, site_id)
+        if site_dir.exists():
+            if site_dir.is_symlink() or site_dir.resolve().parent != root:
+                raise ValueError(f"Unsafe site backup path: {site_dir}")
+            try:
+                meta = json.loads((site_dir / "_backup_metadata.json").read_text())
+            except (OSError, ValueError) as exc:
+                raise ValueError(f"Site backup identity is missing for {site_dir}") from exc
+            if meta.get("site_id") != site_id:
+                raise ValueError(f"Site backup identity mismatch for {site_dir}")
+        return str(site_dir), False
 
     # ════════════════════════════════════════════════════════════
     # FULL BACKUP (multiple sites)
@@ -569,19 +755,28 @@ class BackupEngine:
 
     def backup_site(self, site_info, backup_dir):
         name, path = site_info["name"], site_info["path"]
+        errors_before = len(self.stats["errors"])
         self.stats["current_site"] = name
         self._emit("site_start", {"site": name})
 
         try:
             site_id = self.get_site_id(path)
-            old_manifest = self.manifest.load(name)
+            site_dir, legacy_identity = self._site_backup_dir(backup_dir, name, site_id, path)
+            os.makedirs(site_dir, exist_ok=True)
+            identity_path = os.path.join(site_dir, "_backup_metadata.json")
+            if not os.path.exists(identity_path):
+                with open(identity_path, "w") as handle:
+                    json.dump({"site_name": name, "site_path": path, "site_id": site_id,
+                               "site_storage_key": os.path.basename(site_dir), "status": "running"}, handle)
+            manifest_key = self._site_storage_key(name, site_id)
+            old_manifest = self.manifest.load(manifest_key)
+            if not old_manifest and legacy_identity:
+                old_manifest = self.manifest.load(name)
             new_manifest = {}
             flush_state = self._new_manifest_flush_state()
             libraries = self.get_drives(site_id)
-            site_dir = os.path.join(backup_dir, name.replace(" ", "_"))
-
             def save_site_manifest():
-                self.manifest.save(name, new_manifest)
+                self.manifest.save(manifest_key, new_manifest)
 
             for lib in libraries:
                 drive_id, lib_name = lib["id"], lib["name"]
@@ -601,7 +796,7 @@ class BackupEngine:
                     etag = item.get("eTag", "")
                     modified = item.get("lastModifiedDateTime", "")
                     rel = fpath.split("root:")[-1].lstrip("/")
-                    dest = os.path.join(site_dir, lib_name, rel, fname)
+                    dest = self._safe_destination(site_dir, lib_name, rel, fname)
                     old_entry = old_manifest.get(fid, {})
                     needs_update = self.manifest.needs_update(old_manifest, fid, etag, modified)
 
@@ -618,7 +813,7 @@ class BackupEngine:
                         manifest_entry["path"] = dest
                         manifest_entry["backupTime"] = datetime.now(timezone.utc).isoformat()
                         if not os.path.exists(dest):
-                            if not self._materialize_existing_file(old_entry.get("path", ""), dest):
+                            if not self._materialize_existing_file(old_entry.get("path", ""), dest, int(fsize or 0)):
                                 needs_update = True
                             else:
                                 new_manifest[fid] = manifest_entry
@@ -626,22 +821,22 @@ class BackupEngine:
                                 self._flush_manifest_checkpoint(save_site_manifest, flush_state)
                                 self.progress.files_done += 1
                                 self.stats["files_skipped"] += 1
+                                self.stats["bytes_stored"] += int(fsize or 0)
                                 self._emit("file_done", {"file": fname, "status": "reused"})
                                 return
-                        else:
+                        elif not fsize or os.path.getsize(dest) == fsize:
                             new_manifest[fid] = manifest_entry
                             self._mark_manifest_dirty(flush_state)
                             self._flush_manifest_checkpoint(save_site_manifest, flush_state)
                             self.progress.files_done += 1
                             self.stats["files_skipped"] += 1
+                            self.stats["bytes_stored"] += int(fsize or 0)
                             self._emit("file_done", {"file": fname, "status": "skipped"})
                             return
 
                     if not needs_update:
-                        self.progress.files_done += 1
-                        self.stats["files_skipped"] += 1
-                        self._emit("file_done", {"file": fname, "status": "skipped"})
-                        return
+                        needs_update = True
+                        self.progress.bytes_total += fsize
 
                     try:
                         dl_url = item.get("@microsoft.graph.downloadUrl") or f"{self.GRAPH}/drives/{drive_id}/items/{fid}/content"
@@ -650,6 +845,7 @@ class BackupEngine:
                             dest,
                             fsize,
                             auth_required=not bool(item.get("@microsoft.graph.downloadUrl")),
+                            source_identity=f"{drive_id}:{fid}:{etag}:{modified}:{fsize}",
                         )
                         if dl_result["skipped"]:
                             self.stats["files_skipped"] += 1
@@ -657,7 +853,8 @@ class BackupEngine:
                             self.stats["files_downloaded"] += 1
                             if dl_result["resumed"]:
                                 self.stats["files_resumed"] += 1
-                        self.stats["bytes_downloaded"] += dl_result["bytes_written"]
+                        self.stats["bytes_downloaded"] += int(dl_result.get("transferred_bytes", 0) or 0)
+                        self.stats["bytes_stored"] += int(dl_result.get("final_size", fsize) or 0)
                         new_manifest[fid] = {
                             "name": fname, "path": dest, "eTag": etag,
                             "lastModified": modified, "size": fsize,
@@ -677,6 +874,7 @@ class BackupEngine:
             self._flush_manifest_checkpoint(save_site_manifest, flush_state, force=True)
             meta = {
                 "site_name": name, "site_path": path, "site_id": site_id,
+                "site_storage_key": os.path.basename(site_dir),
                 "backup_time": datetime.now(timezone.utc).isoformat(),
                 "libraries": [{"id": l["id"], "name": l["name"]} for l in libraries],
                 "total_files": len(new_manifest),
@@ -684,6 +882,10 @@ class BackupEngine:
             os.makedirs(site_dir, exist_ok=True)
             with open(os.path.join(site_dir, "_backup_metadata.json"), "w") as f:
                 json.dump(meta, f, indent=2)
+            if len(self.stats["errors"]) > errors_before:
+                self.stats["failed_sites"].append(name)
+                self._emit("site_done", {"site": name, "status": "partial"})
+                return False
             self.stats["successful_sites"] += 1
             self._emit("site_done", {"site": name, "status": "success"})
             return True
@@ -750,7 +952,7 @@ class BackupEngine:
             self._write_size_cache(backup_dir)
             self._write_backup_runtime(
                 backup_dir,
-                "success",
+                "partial" if self.stats["errors"] or self.stats["failed_sites"] else "success",
                 {"ended_at": self.stats["end_time"].isoformat()},
             )
         else:
@@ -848,7 +1050,8 @@ class BackupEngine:
                 folder_parts = folder_path.split("/")
                 first = folder_parts[0]
                 for lib in libraries:
-                    if lib["name"].lower() == first.lower():
+                    library_url_name = unquote(urlparse(lib.get("webUrl") or "").path.rstrip("/").split("/")[-1])
+                    if lib["name"].lower() == first.lower() or library_url_name.lower() == first.lower():
                         target_drive = lib
                         if len(folder_parts) > 1:
                             sub_path = "/".join(folder_parts[1:])
@@ -857,11 +1060,11 @@ class BackupEngine:
                                     f"{self.GRAPH}/drives/{target_drive['id']}/root:/{sub_path}"
                                 )
                                 target_folder_id = folder_item["id"]
-                            except Exception:
-                                pass
+                            except Exception as exc:
+                                raise ValueError(f"Folder not found in library: {sub_path}") from exc
                         break
                 if not target_drive:
-                    target_drive = libraries[0]
+                    raise ValueError(f"Library not found in site: {first}")
             else:
                 target_drive = libraries[0]
 
@@ -895,12 +1098,14 @@ class BackupEngine:
                     etag = item.get("eTag", "")
                     modified = item.get("lastModifiedDateTime", "")
                     rel = fpath.split("root:")[-1].lstrip("/")
-                    dest = os.path.join(dest_dir, rel, fname)
+                    dest = self._safe_destination(dest_dir, rel, fname)
                     old_entry = custom_manifest.get(item_id, {})
-                    if old_entry.get("eTag") == etag and old_entry.get("lastModified") == modified and os.path.exists(dest):
-                        self.progress.bytes_done += fsize
+                    if (old_entry.get("eTag") == etag and old_entry.get("lastModified") == modified
+                            and os.path.exists(dest) and (not fsize or os.path.getsize(dest) == fsize)):
+                        self.progress.sync_current_file_progress(fsize)
                         self.progress.files_done += 1
                         self.stats["files_skipped"] += 1
+                        self.stats["bytes_stored"] += int(fsize or 0)
                         skipped += 1
                         self._emit("file_done", {"file": fname, "status": "skipped"})
                         return
@@ -915,6 +1120,7 @@ class BackupEngine:
                         dest,
                         fsize,
                         auth_required=not bool(item.get("@microsoft.graph.downloadUrl")),
+                        source_identity=f"{target_drive['id']}:{item_id}:{etag}:{modified}:{fsize}",
                     )
                     if dl_result["skipped"]:
                         skipped += 1
@@ -925,7 +1131,8 @@ class BackupEngine:
                         if dl_result["resumed"]:
                             resumed += 1
                             self.stats["files_resumed"] += 1
-                    self.stats["bytes_downloaded"] += dl_result["bytes_written"]
+                    self.stats["bytes_downloaded"] += int(dl_result.get("transferred_bytes", 0) or 0)
+                    self.stats["bytes_stored"] += int(dl_result.get("final_size", fsize) or 0)
                     custom_manifest[item_id] = {
                         "name": fname,
                         "path": dest,
@@ -952,6 +1159,10 @@ class BackupEngine:
                 "url": url, "downloaded": downloaded, "total": total_seen,
                 "dest": dest_dir, "bytes": self.stats["bytes_downloaded"],
                 "skipped": skipped, "resumed": resumed,
+                "errors": list(self.stats["errors"]),
+                "status": "partial" if self.stats["errors"] and downloaded + skipped else (
+                    "failed" if self.stats["errors"] else "success"
+                ),
                 "cancelled": self.stats.get("cancelled", False),
             }
 

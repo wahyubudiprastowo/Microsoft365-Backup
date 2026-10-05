@@ -90,8 +90,23 @@ def register_v11_routes(app):
 
     @app.route("/api/v2/backups/<tenant_slug>/<workload>/<backup_name>", methods=["DELETE"])
     def delete_backup_v2(tenant_slug, workload, backup_name):
-        result = registry.delete(tenant_slug, workload, backup_name)
-        status = 200 if result.get("status") == "deleted" else 404
+        from app.main import get_active_backup_guard
+        from app.restore_manager_v2 import RestoreManagerV2
+
+        path = registry.resolve_backup_path(tenant_slug, workload, backup_name)
+        if not path:
+            return jsonify({"error": "Not found"}), 404
+        active = get_active_backup_guard(fast=True)
+        if active and str((active.get("meta") or {}).get("backup_path") or "") == str(path):
+            return jsonify({"error": "Cannot delete an active backup"}), 409
+        for job in RestoreManagerV2().list_jobs(limit=100):
+            if job.get("status") in {"queued", "running", "paused"} and str(job.get("backup_path") or "") == str(path):
+                return jsonify({"error": "Cannot delete a backup used by an active restore"}), 409
+        result = registry.delete(
+            tenant_slug, workload, backup_name,
+            expected_path=(request.get_json(silent=True) or {}).get("backup_path", ""),
+        )
+        status = 200 if result.get("status") == "deleted" else 400
         return jsonify(result), status
 
     @app.route("/api/v2/backups/<tenant_slug>/<workload>/<backup_name>")

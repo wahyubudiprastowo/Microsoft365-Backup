@@ -6,7 +6,7 @@ from pathlib import Path
 
 from flask import Blueprint, jsonify, render_template, request, redirect, url_for
 
-from app.config_manager import load_config, save_config
+from app.config_manager import load_config, save_config, update_config
 from app.operation_dispatcher import dispatch_next_queued_operation
 from app.operation_queue import OperationQueue
 from app.restore_manager_v2 import RestoreManagerV2
@@ -86,6 +86,75 @@ def _normalize_site_path(value: str) -> str:
     return str(value or "").strip().strip("/")
 
 
+def _format_human_size(size_bytes):
+    try:
+        size = float(size_bytes or 0)
+    except (TypeError, ValueError):
+        size = 0.0
+    units = ["B", "KB", "MB", "GB", "TB", "PB"]
+    unit_idx = 0
+    while size >= 1024 and unit_idx < len(units) - 1:
+        size /= 1024
+        unit_idx += 1
+    return f"{int(size)} B" if unit_idx == 0 else f"{size:.1f} {units[unit_idx]}"
+
+
+def _build_sharepoint_estimate_result(payload: dict, estimate: dict) -> tuple[dict, dict]:
+    graph_id = str(payload.get("graph_id") or "").strip() or estimate.get("site_id")
+    site_path = _normalize_site_path(payload.get("path", "") or estimate.get("path", ""))
+    size_bytes = estimate.get("size_bytes")
+    size_human = _format_human_size(size_bytes)
+    cache_payload = {
+        "size_bytes": size_bytes,
+        "size_human": size_human,
+        "confidence": estimate.get("confidence"),
+        "updated_at": estimate.get("updated_at"),
+        "drives_count": estimate.get("drives_count"),
+        "drives_with_quota": estimate.get("drives_with_quota"),
+        "size_method": estimate.get("size_method"),
+        "raw_drives_used_sum_bytes": estimate.get("raw_drives_used_sum_bytes"),
+        "site_id": estimate.get("site_id"),
+        "site_url": estimate.get("site_url"),
+    }
+    result = {
+        "status": "estimated",
+        "target_id": str(payload.get("id") or "").strip(),
+        "graph_id": graph_id,
+        "path": site_path,
+        "size_bytes": size_bytes,
+        "size_human": size_human,
+        "size_confidence": estimate.get("confidence"),
+        "size_updated_at": estimate.get("updated_at"),
+        "size_method": estimate.get("size_method"),
+        "drives_count": estimate.get("drives_count"),
+    }
+    return result, cache_payload
+
+
+def _persist_sharepoint_estimate(active: dict, result: dict, cache_payload: dict) -> dict:
+    site_path = _normalize_site_path(result.get("path", ""))
+    def mutate(config):
+        for site in config.get("sites", []) or []:
+            if _normalize_site_path(site.get("path", "")) == site_path:
+                site["size_estimate"] = dict(cache_payload)
+                result["cached_to_sites"] = True
+                return
+        for tenant in config.get("tenants", []) or []:
+            if tenant.get("id") != active["id"]:
+                continue
+            target_cache = dict(tenant.get("sharepoint_target_size_cache") or {})
+            for key in (result.get("target_id"), result.get("graph_id"), site_path):
+                if key:
+                    target_cache[key] = dict(cache_payload)
+            if len(target_cache) > 5000:
+                target_cache = dict(list(target_cache.items())[-5000:])
+            tenant["sharepoint_target_size_cache"] = target_cache
+            result["cached_to_tenant"] = True
+            return
+    update_config(mutate)
+    return result
+
+
 def _list_backups():
     root = Path(load_config()["backup"]["root_dir"])
     backups = []
@@ -108,20 +177,24 @@ def _legacy_restore_notice() -> dict:
 
 
 def _resolve_legacy_site_backup_path(source_backup: str, source_site: str) -> Path:
-    backup_root = Path(load_config()["backup"]["root_dir"]) / source_backup
+    configured_root = Path(load_config()["backup"]["root_dir"]).resolve()
+    backup_root = (configured_root / source_backup).resolve()
+    if backup_root.parent != configured_root:
+        raise ValueError("Invalid backup name")
     if not backup_root.exists() or not backup_root.is_dir():
         raise ValueError(f"Backup not found: {source_backup}")
 
-    direct = backup_root / source_site.replace(" ", "_")
-    if direct.exists() and direct.is_dir():
-        return direct.resolve()
-
     normalized = source_site.strip().lower()
+    exact_folder = []
+    matches = []
     for site_dir in backup_root.iterdir():
         if not site_dir.is_dir() or site_dir.name.startswith("."):
             continue
-        if site_dir.name.lower() == normalized:
-            return site_dir.resolve()
+        resolved_site = site_dir.resolve()
+        if resolved_site.parent != backup_root:
+            continue
+        if site_dir.name.lower() == normalized or site_dir.name.lower() == normalized.replace(" ", "_"):
+            exact_folder.append(resolved_site)
         meta_file = site_dir / "_backup_metadata.json"
         if not meta_file.exists():
             continue
@@ -130,8 +203,17 @@ def _resolve_legacy_site_backup_path(source_backup: str, source_site: str) -> Pa
         except Exception:
             continue
         display_name = str(meta.get("site_name") or "").strip().lower()
-        if display_name == normalized:
-            return site_dir.resolve()
+        site_path = str(meta.get("site_path") or "").strip().strip("/").lower()
+        site_id = str(meta.get("site_id") or "").strip().lower()
+        if normalized in {display_name, site_path, site_id}:
+            matches.append(resolved_site)
+
+    if len(set(exact_folder)) == 1 and (not matches or len(set(matches)) == 1):
+        return exact_folder[0]
+    if len(set(matches)) == 1 and not exact_folder:
+        return matches[0]
+    if exact_folder or matches:
+        raise ValueError("Source site is ambiguous; select a unique site path, site ID, or folder name")
 
     raise ValueError(f"Source site not found in backup '{source_backup}': {source_site}")
 
@@ -231,7 +313,10 @@ def api_add_tenant():
 
 @m365_bp.route("/api/tenants/<tid>", methods=["PUT"])
 def api_update_tenant(tid):
-    tenant = tm.update_tenant(tid, request.json or {})
+    try:
+        tenant = tm.update_tenant(tid, request.json or {})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     if not tenant:
         return jsonify({"error": "Not found"}), 404
     return jsonify({"status": "updated", "tenant": _with_tenant_slug(tenant)})
@@ -309,6 +394,51 @@ def api_workload_targets(wtype):
         return jsonify({"error": str(e)}), 500
 
 
+@m365_bp.route("/api/workloads/sharepoint/target-estimate", methods=["POST"])
+def api_sharepoint_target_estimate():
+    active = tm.get_active_tenant(include_secret=True)
+    if not active:
+        return jsonify({"error": "No active tenant"}), 400
+
+    payload = request.get_json(force=True, silent=True) or {}
+    graph_id = str(payload.get("graph_id") or "").strip()
+    site_path = _normalize_site_path(payload.get("path", ""))
+    if not graph_id and "path" not in payload:
+        return jsonify({"error": "Target graph_id or path is required"}), 400
+
+    try:
+        workload = get_workload("sharepoint", active)
+        estimate = workload.estimate_target_size(graph_id=graph_id, site_path=site_path)
+        result, cache_payload = _build_sharepoint_estimate_result(payload, estimate)
+        _persist_sharepoint_estimate(active, result, cache_payload)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 502
+
+
+@m365_bp.route("/api/workloads/sharepoint/target-estimates", methods=["POST"])
+def api_sharepoint_target_estimates():
+    active = tm.get_active_tenant(include_secret=True)
+    if not active:
+        return jsonify({"error": "No active tenant"}), 400
+
+    payload = request.get_json(force=True, silent=True) or {}
+    targets = payload.get("targets") or []
+    if not isinstance(targets, list) or not targets:
+        return jsonify({"error": "Target list is required"}), 400
+    if len(targets) > 50 or any(not isinstance(item, dict) for item in targets):
+        return jsonify({"error": "At most 50 target objects are allowed per request"}), 400
+
+    try:
+        from app.tasks import estimate_sharepoint_targets_task
+        task = estimate_sharepoint_targets_task.apply_async(
+            args=[active["id"], targets], queue="estimates"
+        )
+        return jsonify({"status": "queued", "task_id": task.id, "total": len(targets)}), 202
+    except Exception as e:
+        return jsonify({"error": str(e)}), 502
+
+
 @m365_bp.route("/api/workloads/<wtype>/toggle", methods=["POST"])
 def api_toggle_workload(wtype):
     active = tm.get_active_tenant(include_secret=True)
@@ -373,13 +503,25 @@ def api_save_workload_selection(wtype):
         for target in selected_targets:
             site_path = _normalize_site_path(target.get("path", ""))
             site_name = str(target.get("name") or site_path or "Root Site").strip()
+            size_estimate = {}
+            if target.get("size_bytes") is not None or target.get("size_human"):
+                size_estimate = {
+                    "size_bytes": target.get("size_bytes"),
+                    "size_human": target.get("size_human"),
+                    "confidence": target.get("size_confidence"),
+                    "updated_at": target.get("size_updated_at"),
+                    "source": "workload_target_cache",
+                }
             existing_idx = index_by_path.get(site_path)
             if existing_idx is None:
-                sites.append({
+                new_site = {
                     "name": site_name,
                     "path": site_path,
                     "enabled": True,
-                })
+                }
+                if size_estimate:
+                    new_site["size_estimate"] = size_estimate
+                sites.append(new_site)
                 index_by_path[site_path] = len(sites) - 1
                 added += 1
                 continue
@@ -391,6 +533,9 @@ def api_save_workload_selection(wtype):
             if not site_entry.get("enabled"):
                 site_entry["enabled"] = True
                 reenabled += 1
+            if size_estimate and site_entry.get("size_estimate") != size_estimate:
+                site_entry["size_estimate"] = size_estimate
+                updated += 1
             sites[existing_idx] = site_entry
 
         config["sites"] = sites

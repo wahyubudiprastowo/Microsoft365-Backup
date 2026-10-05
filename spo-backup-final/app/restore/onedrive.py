@@ -103,9 +103,11 @@ class OneDriveRestore(BaseRestore):
             size = local_file.stat().st_size
             if size < 4 * 1024 * 1024:
                 with open(local_file, "rb") as handle:
-                    self._put(f"{self.GRAPH}/drives/{drive_id}/root:/{remote_full}:/content", data=handle)
+                    uploaded = self._put(f"{self.GRAPH}/drives/{drive_id}/root:/{remote_full}:/content", data=handle.read())
             else:
-                self._upload_large_file(local_file, drive_id, remote_full)
+                uploaded = self._upload_large_file(local_file, drive_id, remote_full)
+            if isinstance(uploaded, dict) and uploaded.get("size") is not None and int(uploaded["size"]) != size:
+                raise ValueError(f"Target size {uploaded['size']} does not match local size {size}")
             self.stats["items_processed"] += 1
             self.stats["bytes_uploaded"] += size
             self.emit("file_uploaded", {"current_file": local_file.name})
@@ -125,6 +127,7 @@ class OneDriveRestore(BaseRestore):
         total = local_file.stat().st_size
         with open(local_file, "rb") as handle:
             start = 0
+            completed = None
             while start < total:
                 self._check_control()
                 chunk = handle.read(chunk_size)
@@ -138,7 +141,12 @@ class OneDriveRestore(BaseRestore):
                     timeout=300,
                 )
                 response.raise_for_status()
+                if end + 1 == total:
+                    if response.status_code not in (200, 201):
+                        raise RuntimeError("Upload session did not complete the final chunk")
+                    completed = response.json() if response.content else {}
                 start = end + 1
+        return completed
 
     def dry_run(self) -> dict:
         result = {

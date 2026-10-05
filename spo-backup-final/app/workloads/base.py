@@ -22,7 +22,7 @@ class BaseWorkload:
     workload_type = "base"
     TARGET_COMPLETE_MARKER = "_backup_target_complete.json"
     CANONICAL_BACKUP_DIRNAME = "backup_current"
-    STREAM_CHUNK_SIZE = max(65536, int(os.environ.get("GRAPH_DOWNLOAD_CHUNK_SIZE", "4194304")))
+    STREAM_CHUNK_SIZE = max(65536, int(os.environ.get("GRAPH_DOWNLOAD_CHUNK_SIZE", "8388608")))
 
     def __init__(self, tenant_config):
         self.tenant = tenant_config

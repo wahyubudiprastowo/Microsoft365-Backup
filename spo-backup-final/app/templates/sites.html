@@ -14,17 +14,40 @@
         <div style="font-weight:700;color:var(--text-light);margin-bottom:8px;">Per-Site SharePoint Control</div>
         <div style="font-size:13px;color:var(--text-muted);line-height:1.7;">
             Enable a site to include it in normal SharePoint backup scope. You can also run one enabled site directly from this page without changing the rest of the site registry.
+            Size values below are Graph-based backup data estimates, so they can differ from SharePoint Admin Center storage totals that include recycle bin, versions, and other tenant-side overhead.
         </div>
     </div>
 </div>
 
-<div class="glass-card"><div class="card-header"><h6><i class="bi bi-list-ul"></i> Sites ({{ config.sites|length }})</h6></div>
+<div class="glass-card"><div class="card-header" style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+    <h6><i class="bi bi-list-ul"></i> Sites ({{ config.sites|length }})</h6>
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;min-width:min(100%, 720px);">
+        <div style="position:relative;min-width:260px;flex:1;">
+            <i class="bi bi-search" style="position:absolute;left:12px;top:50%;transform:translateY(-50%);color:var(--text-dim);"></i>
+            <input type="search" id="siteSearchInput" placeholder="Search site name or path..." oninput="filterSites(this.value)" style="width:100%;padding-left:36px;">
+        </div>
+        <div id="siteFilterSummary" style="font-size:12px;color:var(--text-dim);white-space:nowrap;">Showing all sites</div>
+        <div id="siteEstimateTaskStatus" role="status" style="font-size:12px;color:var(--accent);"></div>
+        <button class="btn-modern btn-ghost-modern" style="padding:7px 12px;font-size:12px;" onclick="refreshSiteEstimates(true)">
+            <i class="bi bi-calculator"></i> Refresh Backup Data Estimates
+        </button>
+    </div>
+</div>
 <div class="card-body p-0"><table class="table-modern">
-    <thead><tr><th>#</th><th>Name</th><th>Path</th><th>Status</th><th>Action</th></tr></thead>
-    <tbody>{% for s in config.sites %}<tr>
+    <thead><tr><th>#</th><th>Name</th><th>Path</th><th>Estimated Backup Data</th><th>Status</th><th>Action</th></tr></thead>
+    <tbody id="sitesTableBody">{% for s in config.sites %}<tr data-site-row data-site-name="{{ (s.name or '')|lower }}" data-site-path="{{ (s.path or '')|lower }}">
         <td>{{ loop.index }}</td>
         <td><i class="bi bi-globe" style="color:{% if s.enabled %}var(--primary){% else %}var(--text-dim){% endif %};margin-right:6px;"></i><strong>{{ s.name }}</strong></td>
         <td style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-muted);">{{ s.path or '(root)' }}</td>
+        <td>
+            {% set estimate = s.get('size_estimate') if s.get is defined else none %}
+            <div id="siteEstimate{{ loop.index0 }}" data-site-estimate style="min-width:130px;">
+                <strong style="color:var(--accent);">{{ estimate.size_human if estimate and estimate.size_human else 'Unknown' }}</strong>
+                <div style="font-size:10px;color:var(--text-dim);margin-top:3px;">
+                    {{ estimate.confidence|capitalize if estimate and estimate.confidence else 'Not estimated' }}
+                </div>
+            </div>
+        </td>
         <td><div class="form-check form-switch"><input class="form-check-input" type="checkbox" {% if s.enabled %}checked{% endif %} onchange="toggleSite({{ loop.index0 }})"></div></td>
         <td>
             <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;">
@@ -39,12 +62,108 @@
 {% endblock %}
 
 {% block extra_js %}<script>
+function formatSiteBytes(value) {
+    const size = Number(value || 0);
+    if (!Number.isFinite(size) || size <= 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+    let scaled = size;
+    let unit = 0;
+    while (scaled >= 1024 && unit < units.length - 1) {
+        scaled /= 1024;
+        unit += 1;
+    }
+    return unit === 0 ? `${Math.round(scaled)} B` : `${scaled.toFixed(1)} ${units[unit]}`;
+}
+
+function renderSiteEstimate(item) {
+    const cell = document.getElementById(`siteEstimate${item.index}`);
+    if (!cell) return;
+    const size = item.size_human || (item.size_bytes != null ? formatSiteBytes(item.size_bytes) : 'Unknown');
+    const status = item.status || 'unknown';
+    const confidence = item.confidence || 'unknown';
+    const detail = status === 'error'
+        ? (item.error || 'Unable to estimate')
+        : `${confidence.charAt(0).toUpperCase() + confidence.slice(1)}${item.drives_count != null ? ` • ${item.drives_count} libraries` : ''}`;
+    const color = status === 'error' ? 'var(--danger)' : 'var(--accent)';
+    cell.innerHTML = `
+        <strong style="color:${color};">${escapeHtml(size)}</strong>
+        <div style="font-size:10px;color:var(--text-dim);margin-top:3px;" title="${escapeAttr(detail)}">${escapeHtml(detail)}</div>
+    `;
+}
+
+function filterSites(query) {
+    const text = String(query || '').trim().toLowerCase();
+    let visible = 0;
+    document.querySelectorAll('[data-site-row]').forEach(row => {
+        const name = String(row.dataset.siteName || '');
+        const path = String(row.dataset.sitePath || '');
+        const match = !text || name.includes(text) || path.includes(text);
+        row.style.display = match ? '' : 'none';
+        if (match) visible += 1;
+    });
+    const total = document.querySelectorAll('[data-site-row]').length;
+    const summary = document.getElementById('siteFilterSummary');
+    if (summary) {
+        summary.textContent = text
+            ? `Showing ${visible}/${total} matching sites`
+            : `Showing all ${total} sites`;
+    }
+}
+
+async function refreshSiteEstimates(force = false) {
+    try {
+        if (force) {
+            const queued = await apiCall('/api/sites/estimates/refresh', 'POST');
+            if (queued.error) throw new Error(queued.error);
+            localStorage.setItem('spoSiteEstimateTask', queued.task_id);
+            monitorSiteEstimate(queued.task_id);
+        } else {
+            const result = await apiCall('/api/sites/estimates');
+            (result.sites || []).forEach(renderSiteEstimate);
+        }
+    } catch (err) {
+        showToast(`Failed to refresh site estimates: ${err.message || err}`, 'danger');
+    }
+}
+
+let siteEstimateMonitor = null;
+function monitorSiteEstimate(taskId) {
+    if (siteEstimateMonitor) clearInterval(siteEstimateMonitor);
+    const status = document.getElementById('siteEstimateTaskStatus');
+    const poll = async () => {
+        try {
+            const result = await apiCall(`/api/estimates/status/${encodeURIComponent(taskId)}`);
+            const p = result.progress || {};
+            status.textContent = result.state === 'SUCCESS'
+                ? 'Estimates complete'
+                : `Estimating ${p.done || 0}/${p.total || '...'} sites`;
+            if (result.state === 'SUCCESS' || result.state === 'FAILURE') {
+                clearInterval(siteEstimateMonitor);
+                siteEstimateMonitor = null;
+                localStorage.removeItem('spoSiteEstimateTask');
+                if (result.state === 'SUCCESS') {
+                    await refreshSiteEstimates(false);
+                    showToast(`Estimates complete: ${result.result.estimated} updated, ${result.result.failed} failed`, result.result.failed ? 'warning' : 'success');
+                } else {
+                    status.textContent = 'Estimate failed';
+                    showToast(result.error || 'Estimate job failed', 'danger');
+                }
+            }
+        } catch (err) {
+            status.textContent = 'Estimate status unavailable; job may still be running';
+        }
+    };
+    poll();
+    siteEstimateMonitor = setInterval(poll, 5000);
+}
+
 document.getElementById('addSiteForm').addEventListener('submit', async (e) => {
     e.preventDefault();
     const name = document.getElementById('siteName').value.trim();
     if (!name) return;
     const res = await apiCall('/api/sites', 'POST', { name, path: document.getElementById('sitePath').value.trim(), enabled: true });
     if (res.status === 'added') { showToast('Site added', 'success'); setTimeout(() => location.reload(), 500); }
+    else showToast(res.error || 'Unable to add site', 'danger');
 });
 async function toggleSite(i) { await apiCall(`/api/sites/${i}/toggle`, 'POST'); showToast('Toggled', 'info'); }
 async function runSite(i, name) {
@@ -66,4 +185,10 @@ async function deleteSite(i, n) {
     await apiCall(`/api/sites/${i}`, 'DELETE');
     showToast('Deleted', 'success'); setTimeout(() => location.reload(), 500);
 }
+document.addEventListener('DOMContentLoaded', () => {
+    filterSites('');
+    refreshSiteEstimates(false);
+    const pendingEstimate = localStorage.getItem('spoSiteEstimateTask');
+    if (pendingEstimate) monitorSiteEstimate(pendingEstimate);
+});
 </script>{% endblock %}

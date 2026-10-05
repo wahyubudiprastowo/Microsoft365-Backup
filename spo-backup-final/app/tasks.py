@@ -2,6 +2,7 @@
 import logging
 import os
 import json
+import time
 from pathlib import Path
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
@@ -44,6 +45,157 @@ def setup_file_logger():
 
 
 log = setup_file_logger()
+
+
+def _read_int_env(name: str, default: int, minimum: int = 0) -> int:
+    try:
+        value = int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        value = int(default)
+    return max(minimum, value)
+
+
+def _read_float_env(name: str, default: float, minimum: float = 0.0) -> float:
+    try:
+        value = float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        value = float(default)
+    return max(minimum, value)
+
+
+TASK_PROGRESS_PUBLISH_INTERVAL = _read_float_env("TASK_PROGRESS_PUBLISH_INTERVAL", 0.75, 0.25)
+TASK_PROGRESS_PUBLISH_FILE_STEP = _read_int_env("TASK_PROGRESS_PUBLISH_FILE_STEP", 25, 1)
+TASK_PROGRESS_PUBLISH_BYTE_STEP = _read_int_env(
+    "TASK_PROGRESS_PUBLISH_BYTE_STEP",
+    16 * 1024 * 1024,
+    1024 * 1024,
+)
+TASK_FILE_LOG_INTERVAL = _read_int_env("TASK_FILE_LOG_INTERVAL", 50, 1)
+IMPORTANT_PROGRESS_EVENTS = {
+    "backup_start",
+    "backup_done",
+    "site_start",
+    "site_done",
+    "site_scanning",
+    "custom_start",
+    "custom_done",
+    "custom_scanning",
+    "target_start",
+    "target_done",
+    "paused",
+    "resumed",
+    "cancelled",
+}
+
+
+def _coerce_progress_int(value) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _extract_progress_files(meta: dict | None) -> int:
+    if not isinstance(meta, dict):
+        return 0
+    for key in (
+        "files_done",
+        "targets_processed",
+        "mailboxes_processed",
+        "teams_processed",
+        "sites_processed",
+        "progress_done",
+    ):
+        value = _coerce_progress_int(meta.get(key))
+        if value > 0:
+            return value
+    return 0
+
+
+def _extract_progress_bytes(meta: dict | None) -> int:
+    if not isinstance(meta, dict):
+        return 0
+    for key in ("transfer_bytes_done", "bytes_downloaded", "bytes_done", "bytes_stored"):
+        value = _coerce_progress_int(meta.get(key))
+        if value > 0:
+            return value
+    return 0
+
+
+def _new_progress_publish_state() -> dict:
+    return {
+        "published_once": False,
+        "last_publish_ts": 0.0,
+        "last_publish_files": 0,
+        "last_publish_bytes": 0,
+        "last_file_log_files": 0,
+        "last_tracking_refresh_ts": 0.0,
+    }
+
+
+def _mark_progress_publish(progress_state: dict, meta: dict | None):
+    progress_state["published_once"] = True
+    progress_state["last_publish_ts"] = time.monotonic()
+    progress_state["last_publish_files"] = _extract_progress_files(meta)
+    progress_state["last_publish_bytes"] = _extract_progress_bytes(meta)
+
+
+def _should_publish_progress(event: str, meta: dict | None, progress_state: dict) -> bool:
+    if event in IMPORTANT_PROGRESS_EVENTS:
+        return True
+
+    if not progress_state.get("published_once"):
+        return True
+
+    now = time.monotonic()
+    if (now - float(progress_state.get("last_publish_ts") or 0.0)) >= TASK_PROGRESS_PUBLISH_INTERVAL:
+        return True
+
+    files_done = _extract_progress_files(meta)
+    if files_done - _coerce_progress_int(progress_state.get("last_publish_files")) >= TASK_PROGRESS_PUBLISH_FILE_STEP:
+        return True
+
+    bytes_done = _extract_progress_bytes(meta)
+    if bytes_done - _coerce_progress_int(progress_state.get("last_publish_bytes")) >= TASK_PROGRESS_PUBLISH_BYTE_STEP:
+        return True
+
+    return False
+
+
+def _refresh_task_tracking(redis_client, task_type: str, task_id: str, progress_state: dict):
+    now = time.monotonic()
+    if now - progress_state["last_tracking_refresh_ts"] < 30:
+        return
+    key = f"spo:current_{task_type}_task"
+    try:
+        current = redis_client.get(key)
+        if current in (None, task_id):
+            redis_client.setex(key, 86400, task_id)
+            redis_client.expire(f"spo:task:{task_id}:control", 86400)
+        progress_state["last_tracking_refresh_ts"] = now
+    except Exception as e:
+        log.warning(f"Failed to refresh {task_type} task tracking for {task_id[:8]}: {e}")
+
+
+def _publish_task_progress(redis_client, celery_task, task_id: str, event: str, meta: dict | None, progress_state: dict, task_type: str = "backup"):
+    _refresh_task_tracking(redis_client, task_type, task_id, progress_state)
+    if not _should_publish_progress(event, meta, progress_state):
+        return False
+    _store_task_snapshot(redis_client, task_id, "PROGRESS", meta)
+    celery_task.update_state(state="PROGRESS", meta=meta)
+    _mark_progress_publish(progress_state, meta)
+    return True
+
+
+def _should_log_file_event(meta: dict | None, progress_state: dict) -> bool:
+    files_done = _extract_progress_files(meta)
+    if files_done <= 0:
+        return False
+    last_logged = _coerce_progress_int(progress_state.get("last_file_log_files"))
+    if files_done - last_logged >= TASK_FILE_LOG_INTERVAL or last_logged == 0:
+        progress_state["last_file_log_files"] = files_done
+        return True
+    return False
 
 
 def _store_task_snapshot(redis_client, task_id: str, state: str, meta: dict | None):
@@ -101,6 +253,7 @@ def _write_workload_manifest(backup_path: str, workload_name: str, stats: dict, 
         "files_skipped": stats.get("files_skipped", 0),
         "files_resumed": stats.get("files_resumed", 0),
         "bytes_downloaded": stats.get("bytes_downloaded", 0),
+        "bytes_stored": stats.get("bytes_stored", 0),
         "successful_sites": stats.get("successful_sites", 0),
         "total_sites": stats.get("total_sites", 0),
         "failed_sites": stats.get("failed_sites", []),
@@ -220,9 +373,11 @@ def run_backup_task(self, custom_root: str = None, tenant_id: str = None, worklo
     r.setex("spo:current_backup_task", 86400, task_id)
     # ★ Reset control state to RUNNING when starting ★
     r.setex(f"spo:task:{task_id}:control", 86400, "running")
+    progress_state = _new_progress_publish_state()
 
     def progress_cb(evt, data):
         runtime_lease.refresh()
+        data = data or {}
         if evt == "site_start":
             log.info(f"→ Backing up: {data.get('current_site', '?')}")
         elif evt == "site_done":
@@ -231,7 +386,7 @@ def run_backup_task(self, custom_root: str = None, tenant_id: str = None, worklo
                 log.info(f"  ✅ '{site}' completed")
             else:
                 log.error(f"  ❌ '{site}' failed: {data.get('error', '?')}")
-        elif evt == "file_done":
+        elif evt == "file_done" and _should_log_file_event(data, progress_state):
             fname = data.get("current_file", "")
             if fname:
                 log.info(f"  📥 {fname}")
@@ -242,8 +397,7 @@ def run_backup_task(self, custom_root: str = None, tenant_id: str = None, worklo
         elif evt == "cancelled":
             log.warning(f"⛔ Cancelled")
         snapshot_meta = {"event": evt, **data}
-        _store_task_snapshot(r, task_id, "PROGRESS", snapshot_meta)
-        self.update_state(state="PROGRESS", meta=snapshot_meta)
+        _publish_task_progress(r, self, task_id, evt, snapshot_meta, progress_state, "backup")
 
     engine = BackupEngine(config, progress_callback=progress_cb, task_id=task_id)
 
@@ -256,6 +410,7 @@ def run_backup_task(self, custom_root: str = None, tenant_id: str = None, worklo
         "files_downloaded": 0,
         "files_skipped": 0,
         "bytes_downloaded": 0,
+        "bytes_stored": 0,
         "errors": [],
         "start_time": datetime.now(timezone.utc),
         "end_time": None,
@@ -275,6 +430,7 @@ def run_backup_task(self, custom_root: str = None, tenant_id: str = None, worklo
             stats["files_downloaded"] += source_stats.get("files_downloaded", 0) or 0
             stats["files_skipped"] += source_stats.get("files_skipped", 0) or 0
             stats["bytes_downloaded"] += source_stats.get("bytes_downloaded", 0) or 0
+            stats["bytes_stored"] += source_stats.get("bytes_stored", 0) or 0
             stats["errors"].extend(source_stats.get("errors", []) or [])
             if source_stats.get("cancelled"):
                 stats["cancelled"] = True
@@ -331,9 +487,11 @@ def run_backup_task(self, custom_root: str = None, tenant_id: str = None, worklo
                     raise ValueError(f"No active tenant configured for {label} backup")
 
                 workload_root = resolve_workload_root(workload_name)
+                workload_progress_state = _new_progress_publish_state()
 
                 def workload_progress_cb(evt, data, current_workload=workload_name, current_label=label):
                     runtime_lease.refresh()
+                    data = data or {}
                     if evt == "target_start":
                         log.info(f"→ {current_label} backup: {data.get('target_name', '?')}")
                     elif evt == "target_done":
@@ -341,7 +499,7 @@ def run_backup_task(self, custom_root: str = None, tenant_id: str = None, worklo
                             log.info(f"  ✅ {current_label} '{data.get('target_name', '?')}' completed")
                         else:
                             log.error(f"  ❌ {current_label} '{data.get('target_name', '?')}' failed: {data.get('error', '?')}")
-                    elif evt == "file_done":
+                    elif evt == "file_done" and _should_log_file_event(data, workload_progress_state):
                         fname = data.get("current_file", "")
                         if fname:
                             log.info(f"  📥 {current_label}: {fname}")
@@ -352,8 +510,14 @@ def run_backup_task(self, custom_root: str = None, tenant_id: str = None, worklo
                     }
                     if snapshot_meta.get("target_name") and not snapshot_meta.get("current_site"):
                         snapshot_meta["current_site"] = snapshot_meta.get("target_name")
-                    _store_task_snapshot(r, task_id, "PROGRESS", snapshot_meta)
-                    self.update_state(state="PROGRESS", meta=snapshot_meta)
+                    _publish_task_progress(
+                        r,
+                        self,
+                        task_id,
+                        evt,
+                        snapshot_meta,
+                        workload_progress_state,
+                    )
 
                 workload_module = __import__(module_name, fromlist=[class_name])
                 workload_cls = getattr(workload_module, class_name)
@@ -402,7 +566,8 @@ def run_backup_task(self, custom_root: str = None, tenant_id: str = None, worklo
         log.info("=" * 60)
         log.info(f"BACKUP COMPLETED — {stats.get('successful_sites', 0)}/{stats.get('total_sites', 0)} sites")
         log.info(f"  Files DL : {stats.get('files_downloaded', 0)}")
-        log.info(f"  Total Size: {stats.get('bytes_downloaded', 0) / 1024 / 1024:.2f} MB")
+        total_size_bytes = int(stats.get("bytes_stored") or stats.get("bytes_downloaded") or 0)
+        log.info(f"  Total Size: {total_size_bytes / 1024 / 1024:.2f} MB")
         log.info("=" * 60)
 
         for workload_name, backup_path in stats.get("backup_paths", {}).items():
@@ -546,21 +711,24 @@ def download_custom_url_task(self, url: str, dest_dir: str = None):
     r = redis_lib.Redis(host="redis", port=6379, db=2, decode_responses=True)
     r.setex("spo:current_download_task", 86400, task_id)
     r.setex(f"spo:task:{task_id}:control", 86400, "running")
+    progress_state = _new_progress_publish_state()
 
     def progress_cb(evt, data):
         runtime_lease.refresh()
-        if evt == "file_done":
+        data = data or {}
+        if evt == "file_done" and _should_log_file_event(data, progress_state):
             fname = data.get("current_file", "")
             if fname:
                 log.info(f"  📥 {fname}")
         snapshot_meta = {"event": evt, **data}
-        _store_task_snapshot(r, task_id, "PROGRESS", snapshot_meta)
-        self.update_state(state="PROGRESS", meta=snapshot_meta)
+        _publish_task_progress(r, self, task_id, evt, snapshot_meta, progress_state, "download")
 
     engine = BackupEngine(config, progress_callback=progress_cb, task_id=task_id)
     try:
         result = engine.download_custom_url(url, dest_dir=dest_dir)
         log.info(f"DOWNLOAD COMPLETED — {result.get('downloaded', 0)} files")
+        if result.get("status") in {"partial", "failed"}:
+            log.warning("Download finished with %s file error(s)", len(result.get("errors") or []))
         _store_task_snapshot(r, task_id, "SUCCESS", result)
         r.delete("spo:current_download_task")
         r.delete(f"spo:task:{task_id}:control")
@@ -578,6 +746,49 @@ def download_custom_url_task(self, url: str, dest_dir: str = None):
             runtime_lease.release()
         except Exception:
             pass
+
+
+@celery_app.task(bind=True, name="app.tasks.estimate_sharepoint_targets_task")
+def estimate_sharepoint_targets_task(self, tenant_id: str, targets: list[dict], marker_key: str = ""):
+    from app.main_routes import _build_sharepoint_estimate_result, _persist_sharepoint_estimate
+    from app.tenant_manager import TenantManager
+    from app.workloads import get_workload
+
+    tenant = TenantManager().get_tenant(tenant_id, include_secret=True)
+    if not tenant:
+        raise ValueError("Tenant not found")
+    workload = get_workload("sharepoint", tenant)
+    results = []
+    failed = 0
+    redis_client = None
+    if marker_key:
+        import redis as redis_lib
+        redis_client = redis_lib.Redis(host="redis", port=6379, db=2, decode_responses=True)
+    try:
+        for index, item in enumerate(targets):
+            item = item or {}
+            graph_id = str(item.get("graph_id") or "").strip()
+            site_path = str(item.get("path") or "").strip().strip("/")
+            try:
+                if not graph_id and not site_path and not item.get("root_site"):
+                    raise ValueError("Target graph_id or path is required")
+                estimate = workload.estimate_target_size(graph_id=graph_id, site_path=site_path)
+                result, cache_payload = _build_sharepoint_estimate_result(item, estimate)
+                _persist_sharepoint_estimate(tenant, result, cache_payload)
+                results.append(result)
+            except Exception as exc:
+                failed += 1
+                results.append({"status": "error", "target_id": str(item.get("id") or ""),
+                                "graph_id": graph_id, "path": site_path, "error": str(exc)})
+            self.update_state(state="PROGRESS", meta={
+                "done": index + 1, "total": len(targets), "failed": failed,
+            })
+            if redis_client and redis_client.get(marker_key) == self.request.id:
+                redis_client.expire(marker_key, 86400)
+        return {"status": "ok", "estimated": len(results) - failed, "failed": failed, "results": results}
+    finally:
+        if redis_client and redis_client.get(marker_key) == self.request.id:
+            redis_client.delete(marker_key)
 
 
 @celery_app.task(bind=True, name="app.tasks.run_restore_task")

@@ -88,14 +88,11 @@ def register_v12_routes(app):
     @app.route("/api/v2/schedules/reload", methods=["POST"])
     def reload_schedules_v12():
         try:
-            from app.tasks import celery_app
-            from app.tasks_v12 import register_tenant_schedules
-
-            registered = register_tenant_schedules(celery_app)
+            registered = [entry["tenant_slug"] for entry in sm.list_enabled_schedules()]
             return jsonify({
-                "status": "reload_staged",
-                "note": "Schedule config reloaded in web process. Restart celery-beat to fully apply updated schedules.",
-                "pending_restart": True,
+                "status": "reload_pending",
+                "note": "Celery beat detects updated schedule configuration within 30 seconds.",
+                "pending_restart": False,
                 "active_schedules": registered,
             })
         except Exception as e:

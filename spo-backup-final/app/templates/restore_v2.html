@@ -684,11 +684,11 @@ async function refreshJobs() {
         container.innerHTML = `<div style="padding:40px;text-align:center;color:var(--text-dim);"><i class="bi bi-inbox" style="font-size:48px;opacity:0.5;display:block;margin-bottom:10px;"></i>No restore jobs yet</div>`;
         return;
     }
-    const colors = {completed:'var(--success)', running:'var(--primary)', failed:'var(--danger)', queued:'var(--warning)', cancelled:'var(--text-dim)', paused:'#a855f7'};
+    const colors = {completed:'var(--success)', partial:'var(--warning)', running:'var(--primary)', failed:'var(--danger)', queued:'var(--warning)', cancelled:'var(--text-dim)', paused:'#a855f7'};
     container.innerHTML = jobs.map(j => {
         const c = colors[j.status] || 'var(--text-dim)';
         const canCancel = ['queued', 'running', 'paused'].includes(j.status);
-        const canDelete = ['completed', 'failed', 'cancelled'].includes(j.status);
+        const canDelete = ['completed', 'partial', 'failed', 'cancelled'].includes(j.status);
         const operationColor = j.operation_kind === 'copy' ? 'var(--warning)' : 'var(--accent)';
         return `<div class="job-card">
             <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:8px;">

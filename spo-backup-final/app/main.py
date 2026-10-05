@@ -4,6 +4,9 @@ import json
 import logging
 import shutil
 import time
+import hmac
+import uuid
+import hashlib
 from urllib.parse import urlparse
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,7 +14,7 @@ from pathlib import Path
 from flask import Flask, render_template, request, jsonify, redirect, url_for
 from celery.result import AsyncResult
 
-from app.config_manager import load_config, save_config, add_site, remove_site, toggle_site
+from app.config_manager import load_config, save_config, update_config, add_site, remove_site, toggle_site
 from app.backup_engine import RestoreEngine, BackupEngine
 from app.main_routes import register_m365_routes
 from app.main_routes_v11 import register_v11_routes
@@ -49,6 +52,28 @@ register_v13_routes(app)
 
 _restore_engine_cache = None
 _last_queue_dispatch_attempt = 0.0
+_active_discovery_next_at = {}
+
+
+@app.before_request
+def require_admin_auth():
+    if request.path == "/api/health" or app.testing:
+        return None
+    expected_user = os.environ.get("SPO_ADMIN_USERNAME", "admin")
+    expected_password = os.environ.get("SPO_ADMIN_PASSWORD", "")
+    if not expected_password:
+        return jsonify({"error": "Admin authentication is not configured"}), 503
+    credentials = request.authorization
+    if not credentials or not (
+        hmac.compare_digest(credentials.username or "", expected_user)
+        and hmac.compare_digest(credentials.password or "", expected_password)
+    ):
+        return ("Authentication required", 401, {"WWW-Authenticate": 'Basic realm="M365 Backup"'})
+    if request.method not in {"GET", "HEAD", "OPTIONS"}:
+        origin = request.headers.get("Origin") or request.headers.get("Referer")
+        if origin and urlparse(origin).netloc != request.host:
+            return jsonify({"error": "Cross-origin write rejected"}), 403
+    return None
 
 
 @app.after_request
@@ -314,10 +339,37 @@ def _get_tracked_task_id(task_type: str):
     if not redis_key:
         return None
     try:
-        return _redis.get(redis_key)
+        task_id = _redis.get(redis_key)
     except redis_lib.RedisError as e:
         log.warning(f"Failed to read tracked {task_type} task from Redis: {e}")
         return None
+    if task_id:
+        return task_id
+
+    now = time.monotonic()
+    if now < _active_discovery_next_at.get(task_type, 0):
+        return None
+    _active_discovery_next_at[task_type] = now + 10
+    task_name = {
+        "backup": "app.tasks.run_backup_task",
+        "download": "app.tasks.download_custom_url_task",
+    }.get(task_type)
+    if not task_name:
+        return None
+    try:
+        capp, _, _, _, _, _, _ = get_celery()
+        active = capp.control.inspect(timeout=1.0).active() or {}
+        for worker_tasks in active.values():
+            for item in worker_tasks or []:
+                if item.get("name") != task_name and item.get("type") != task_name:
+                    continue
+                task_id = item.get("id")
+                if task_id:
+                    _redis.setex(redis_key, 86400, task_id)
+                    return task_id
+    except Exception as e:
+        log.warning(f"Failed to discover active {task_type} task: {e}")
+    return None
 
 
 def _task_snapshot_redis_key(task_id: str) -> str:
@@ -478,7 +530,12 @@ def get_active_task_overlay(task_type: str, prefer_disk_size: bool = False, fast
                 backup_path = (snapshot.get("meta") or {}).get("backup_path")
             elif task_type == "download":
                 backup_path = (snapshot.get("meta") or {}).get("dest")
-            live_size = int((snapshot.get("meta") or {}).get("bytes_done") or (snapshot.get("meta") or {}).get("bytes_downloaded") or 0)
+            live_size = int(
+                (snapshot.get("meta") or {}).get("bytes_stored")
+                or (snapshot.get("meta") or {}).get("bytes_done")
+                or (snapshot.get("meta") or {}).get("bytes_downloaded")
+                or 0
+            )
             if backup_path and prefer_disk_size and live_size <= 0:
                 live_size = max(live_size, _calculate_backup_size(backup_path))
             snapshot["live_size_bytes"] = live_size
@@ -527,7 +584,7 @@ def get_active_task_overlay(task_type: str, prefer_disk_size: bool = False, fast
             return None
 
     meta = snapshot.get("meta") or {}
-    live_size = int(meta.get("bytes_done") or meta.get("bytes_downloaded") or 0)
+    live_size = int(meta.get("bytes_stored") or meta.get("bytes_done") or meta.get("bytes_downloaded") or 0)
     if backup_path:
         if prefer_disk_size and live_size <= 0:
             live_size = max(live_size, _calculate_backup_size(backup_path))
@@ -619,7 +676,12 @@ def get_active_backup_guard(fast: bool = False):
         return None
 
     primary = active_items[0]
-    live_size = int(primary.get("meta", {}).get("bytes_done") or primary.get("meta", {}).get("bytes_downloaded") or 0)
+    live_size = int(
+        primary.get("meta", {}).get("bytes_stored")
+        or primary.get("meta", {}).get("bytes_done")
+        or primary.get("meta", {}).get("bytes_downloaded")
+        or 0
+    )
     return {
         "task_id": primary.get("task_id"),
         "state": primary.get("state"),
@@ -694,11 +756,11 @@ def maybe_dispatch_queued_operations(force: bool = False):
 
     dispatched = []
     queue = OperationQueue()
-    if not get_active_backup_guard() and queue.length("backup"):
+    if queue.length("backup") and not get_active_backup_guard():
         result = dispatch_next_queued_operation("backup")
         if result and not result.get("error") and result.get("status") != "busy":
             dispatched.append(result)
-    if not get_active_download_guard() and queue.length("download"):
+    if queue.length("download") and not get_active_download_guard():
         result = dispatch_next_queued_operation("download")
         if result and not result.get("error") and result.get("status") != "busy":
             dispatched.append(result)
@@ -706,12 +768,14 @@ def maybe_dispatch_queued_operations(force: bool = False):
         from app.restore_manager_v2 import RestoreManagerV2
 
         restore_mgr = RestoreManagerV2()
-        restore_mgr.recover_stale_queued_jobs(limit=100)
-        running_restore = next((item for item in restore_mgr.list_jobs(limit=100) if item.get("status") == "running"), None)
-        if not running_restore and queue.length("restore"):
-            result = dispatch_next_queued_operation("restore")
-            if result and not result.get("error") and result.get("status") != "busy":
-                dispatched.append(result)
+        restore_jobs = restore_mgr.list_jobs(limit=100)
+        if queue.length("restore") or any(item.get("status") == "queued" for item in restore_jobs):
+            restore_mgr.recover_stale_queued_jobs(limit=100)
+            running_restore = next((item for item in restore_jobs if item.get("status") == "running"), None)
+            if not running_restore and queue.length("restore"):
+                result = dispatch_next_queued_operation("restore")
+                if result and not result.get("error") and result.get("status") != "busy":
+                    dispatched.append(result)
     except Exception:
         pass
     return dispatched
@@ -1001,10 +1065,7 @@ def api_active_task():
 
 @app.route("/api/tasks/overview")
 def api_tasks_overview():
-    running_backup = get_active_backup_guard(fast=True)
-    running_download = get_active_download_guard(fast=True)
-    if not running_backup and not running_download:
-        maybe_dispatch_queued_operations()
+    maybe_dispatch_queued_operations()
     return jsonify(get_tasks_overview())
 
 
@@ -1017,22 +1078,60 @@ def api_get_config():
         safe["azure_ad"]["client_secret"] = "***MASKED***"
     if safe.get("notification", {}).get("smtp", {}).get("password"):
         safe["notification"]["smtp"]["password"] = "***MASKED***"
+    if safe.get("notification", {}).get("telegram", {}).get("bot_token"):
+        safe["notification"]["telegram"]["bot_token"] = "***MASKED***"
+    for tenant in safe.get("tenants", []):
+        if tenant.get("client_secret"):
+            tenant["client_secret"] = "***MASKED***"
     for dest in safe.get("backup", {}).get("remote_destinations", []):
         if dest.get("config", {}).get("password"):
             dest["config"]["password"] = "***MASKED***"
+    safe["_config_revision"] = hashlib.sha256(json.dumps(c, sort_keys=True).encode()).hexdigest()
     return jsonify(safe)
 
 
 @app.route("/api/config", methods=["POST"])
 def api_save_config():
     try:
-        n = request.json
-        c = load_config()
-        if n.get("azure_ad", {}).get("client_secret") == "***MASKED***":
-            n["azure_ad"]["client_secret"] = c["azure_ad"]["client_secret"]
-        if n.get("notification", {}).get("smtp", {}).get("password") == "***MASKED***":
-            n["notification"]["smtp"]["password"] = c["notification"]["smtp"]["password"]
-        save_config(n)
+        n = request.get_json(silent=True)
+        if not isinstance(n, dict):
+            raise ValueError("Configuration must be a JSON object")
+        revision = n.pop("_config_revision", None)
+        if not revision:
+            raise ValueError("Configuration revision is required; reload the editor")
+
+        def preserve_masked(new_values, old_values, field):
+            if isinstance(new_values, dict) and new_values.get(field) == "***MASKED***":
+                new_values[field] = (old_values or {}).get(field, "")
+
+        def mutate(c):
+            current_revision = hashlib.sha256(json.dumps(c, sort_keys=True).encode()).hexdigest()
+            if not hmac.compare_digest(revision, current_revision):
+                raise ValueError("Configuration changed since this editor was opened; reload before saving")
+            for section, kind in (("azure_ad", dict), ("sharepoint", dict), ("backup", dict),
+                                  ("notification", dict), ("schedule", dict), ("sites", list), ("tenants", list)):
+                if not isinstance(n.get(section), kind):
+                    raise ValueError(f"{section} must be {kind.__name__}")
+            if not set(c).issubset(n):
+                raise ValueError("Configuration sections cannot be removed")
+            if n.get("active_tenant_id") and not any(t.get("id") == n["active_tenant_id"] for t in n["tenants"] if isinstance(t, dict)):
+                raise ValueError("Active tenant is not present in tenants")
+            preserve_masked(n.get("azure_ad"), c.get("azure_ad"), "client_secret")
+            preserve_masked(n.get("notification", {}).get("smtp"), c.get("notification", {}).get("smtp"), "password")
+            preserve_masked(n.get("notification", {}).get("telegram"), c.get("notification", {}).get("telegram"), "bot_token")
+            old_tenants = {tenant.get("id"): tenant for tenant in c.get("tenants", [])}
+            for tenant in n["tenants"]:
+                if not isinstance(tenant, dict):
+                    raise ValueError("Each tenant must be an object")
+                preserve_masked(tenant, old_tenants.get(tenant.get("id")), "client_secret")
+            old_destinations = {item.get("name"): item for item in c.get("backup", {}).get("remote_destinations", [])}
+            for dest in n["backup"].get("remote_destinations", []):
+                old_dest = old_destinations.get(dest.get("name"), {})
+                preserve_masked(dest.get("config"), old_dest.get("config"), "password")
+            c.clear()
+            c.update(n)
+
+        update_config(mutate)
         return jsonify({"status": "saved"})
     except Exception as e:
         return jsonify({"error": str(e)}), 400
@@ -1041,6 +1140,8 @@ def api_save_config():
 @app.route("/api/schedule", methods=["POST"])
 def api_save_schedule():
     try:
+        from app.schedule_manager import ScheduleManager
+
         data = request.json
         c = load_config()
         c["schedule"] = {
@@ -1048,8 +1149,9 @@ def api_save_schedule():
             "cron_expression": data.get("cron_expression", "0 2 * * *").strip(),
             "timezone": data.get("timezone", "Asia/Jakarta"),
         }
-        if len(c["schedule"]["cron_expression"].split()) != 5:
-            return jsonify({"error": "Cron must have 5 parts"}), 400
+        ScheduleManager()._validate_cron(c["schedule"]["cron_expression"])
+        if c["schedule"]["timezone"] != "Asia/Jakarta":
+            return jsonify({"error": "Global schedules currently require Asia/Jakarta timezone"}), 400
         save_config(c)
         # ★ Clear marker so next worker boot will log the new schedule
         try:
@@ -1148,12 +1250,105 @@ def api_get_sites():
     return jsonify(load_config().get("sites", []))
 
 
+def _format_bytes(value):
+    try:
+        size = float(value or 0)
+    except (TypeError, ValueError):
+        size = 0.0
+    units = ["B", "KB", "MB", "GB", "TB", "PB"]
+    idx = 0
+    while size >= 1024 and idx < len(units) - 1:
+        size /= 1024
+        idx += 1
+    if idx == 0:
+        return f"{int(size)} B"
+    return f"{size:.1f} {units[idx]}"
+
+
+@app.route("/api/sites/estimates", methods=["GET"])
+def api_site_estimates():
+    config = load_config()
+    sites = list(config.get("sites", []) or [])
+    results = []
+
+    for idx, site in enumerate(sites):
+        site_entry = dict(site or {})
+        cached = dict(site_entry.get("size_estimate") or {})
+        payload = {
+            "index": idx,
+            "name": site_entry.get("name") or f"Site #{idx + 1}",
+            "path": str(site_entry.get("path") or "").strip().strip("/"),
+            "enabled": bool(site_entry.get("enabled")),
+            "status": "cached" if cached else "unknown",
+            "size_bytes": cached.get("size_bytes"),
+            "size_human": cached.get("size_human") or (
+                _format_bytes(cached.get("size_bytes")) if cached.get("size_bytes") is not None else "Unknown"
+            ),
+            "confidence": cached.get("confidence") or "unknown",
+            "updated_at": cached.get("updated_at"),
+            "drives_count": cached.get("drives_count"),
+        }
+
+        results.append(payload)
+
+    return jsonify({
+        "status": "ok",
+        "refresh": False,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "sites": results,
+    })
+
+
+@app.route("/api/sites/estimates/refresh", methods=["POST"])
+def api_refresh_site_estimates():
+    from app.tenant_manager import TenantManager
+    from app.tasks import estimate_sharepoint_targets_task
+
+    active = TenantManager().get_active_tenant(include_secret=False)
+    if not active:
+        return jsonify({"error": "No active tenant"}), 400
+    marker = "spo:sites_estimates_task"
+    existing = _redis.get(marker)
+    if existing:
+        current = AsyncResult(existing, app=get_celery()[0])
+        if current.state in {"PENDING", "STARTED", "PROGRESS"}:
+            return jsonify({"status": "queued", "task_id": existing}), 202
+        _redis.delete(marker)
+    sites = load_config().get("sites", []) or []
+    targets = [{"id": str(i), "path": site.get("path", ""), "root_site": not site.get("path")}
+               for i, site in enumerate(sites)]
+    task_id = str(uuid.uuid4())
+    if not _redis.set(marker, task_id, nx=True, ex=86400):
+        return jsonify({"status": "queued", "task_id": _redis.get(marker)}), 202
+    try:
+        estimate_sharepoint_targets_task.apply_async(
+            args=[active["id"], targets, marker], task_id=task_id, queue="estimates"
+        )
+    except Exception:
+        _redis.delete(marker)
+        raise
+    return jsonify({"status": "queued", "task_id": task_id, "total": len(targets)}), 202
+
+
+@app.route("/api/estimates/status/<task_id>")
+def api_estimate_status(task_id):
+    task = AsyncResult(task_id, app=get_celery()[0])
+    if task.state == "SUCCESS":
+        return jsonify({"state": "SUCCESS", "result": task.result})
+    if task.state == "FAILURE":
+        return jsonify({"state": "FAILURE", "error": str(task.result)})
+    return jsonify({"state": task.state, "progress": task.info if isinstance(task.info, dict) else {}})
+
+
 @app.route("/api/sites", methods=["POST"])
 def api_add_site():
-    d = request.json
+    d = request.json or {}
     if not d.get("name", "").strip():
         return jsonify({"error": "Name required"}), 400
-    add_site(d["name"].strip(), d.get("path", "").strip(), d.get("enabled", True))
+    try:
+        add_site(d["name"].strip(), d.get("path", "").strip(), d.get("enabled", True))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     return jsonify({"status": "added"})
 
 
@@ -1298,9 +1493,14 @@ def api_start_backup():
 def api_backup_status(tid):
     cached = _read_cached_task_snapshot(tid)
     control_state = TaskController.get_state(tid)
-    if cached and (str(cached.get("state") or "").upper() in {"PROGRESS", "STARTED"} or control_state in {"running", "paused", "cancelled"}):
+    if cached and str(cached.get("state") or "").upper() in {"PROGRESS", "STARTED"}:
         meta_info = cached.get("meta") or {}
-        live_size = int((meta_info or {}).get("bytes_done") or (meta_info or {}).get("bytes_downloaded") or 0)
+        live_size = int(
+            (meta_info or {}).get("bytes_stored")
+            or (meta_info or {}).get("bytes_done")
+            or (meta_info or {}).get("bytes_downloaded")
+            or 0
+        )
         if meta_info:
             meta_info["live_size_bytes"] = live_size
             meta_info["live_size_human"] = _human_size(live_size)
@@ -1332,7 +1532,12 @@ def api_backup_status(tid):
     if meta_info:
         _write_cached_task_snapshot(tid, state, meta_info)
     backup_path = str((meta_info or {}).get("backup_path") or "").strip()
-    live_size = int((meta_info or {}).get("bytes_done") or (meta_info or {}).get("bytes_downloaded") or 0)
+    live_size = int(
+        (meta_info or {}).get("bytes_stored")
+        or (meta_info or {}).get("bytes_done")
+        or (meta_info or {}).get("bytes_downloaded")
+        or 0
+    )
     if backup_path:
         try:
             live_size = max(live_size, _calculate_backup_size(backup_path))
@@ -1345,10 +1550,13 @@ def api_backup_status(tid):
     res["live_size_human"] = _human_size(live_size)
 
     if state == "PENDING":
-        control_state = TaskController.get_state(tid)
-        if control_state in {"running", "paused", "cancelled"}:
+        try:
+            tracked_control_state = _redis.get(f"spo:task:{tid}:control")
+        except redis_lib.RedisError:
+            tracked_control_state = None
+        if tracked_control_state in {"running", "paused", "cancelled"}:
             res["state"] = "PROGRESS"
-            res["control_state"] = control_state
+            res["control_state"] = tracked_control_state
             res["meta"] = meta_info
             return jsonify(res)
         return jsonify(res)
@@ -1388,6 +1596,14 @@ def api_backup_size(name):
     """Compute size on-demand for a single backup (called when user expands row)."""
     config = load_config()
     backup_path = Path(config["backup"]["root_dir"]) / name
+    root_path = Path(config["backup"]["root_dir"]).resolve()
+    if backup_path.resolve().parent != root_path or backup_path.is_symlink():
+        return jsonify({"error": "Backup path is not a direct child of the configured root"}), 400
+    if (request.get_json(silent=True) or {}).get("backup_path") != str(backup_path.resolve()):
+        return jsonify({"error": "Exact backup path confirmation is required"}), 400
+    active = get_active_backup_guard(fast=True)
+    if active and str((active.get("meta") or {}).get("backup_path") or "") == str(backup_path.resolve()):
+        return jsonify({"error": "Cannot delete an active backup"}), 409
     if not backup_path.exists() or not backup_path.is_dir():
         return jsonify({"error": "Not found"}), 404
     
@@ -1486,6 +1702,8 @@ def api_delete_backup(name):
 @app.route("/api/backups/cleanup-empty", methods=["POST"])
 def api_cleanup_empty():
     """Delete all empty/failed backup folders (0 MB)."""
+    if (request.get_json(silent=True) or {}).get("confirm") != "delete-empty-local-backups":
+        return jsonify({"error": "Explicit cleanup confirmation is required"}), 400
     config = load_config()
     root = Path(config["backup"]["root_dir"])
     deleted = []
@@ -1584,7 +1802,7 @@ def api_parse_url():
 def api_download_status(tid):
     cached = _read_cached_task_snapshot(tid)
     control_state = TaskController.get_state(tid)
-    if cached and (str(cached.get("state") or "").upper() in {"PROGRESS", "STARTED"} or control_state in {"running", "paused", "cancelled"}):
+    if cached and str(cached.get("state") or "").upper() in {"PROGRESS", "STARTED"}:
         return jsonify({
             "task_id": tid,
             "state": "PROGRESS",
@@ -1607,13 +1825,16 @@ def api_download_status(tid):
 
     res = {"task_id": tid, "state": state}
     if state == "PENDING":
-        control_state = TaskController.get_state(tid)
-        if control_state in {"running", "paused", "cancelled"}:
+        try:
+            tracked_control_state = _redis.get(f"spo:task:{tid}:control")
+        except redis_lib.RedisError:
+            tracked_control_state = None
+        if tracked_control_state in {"running", "paused", "cancelled"}:
             compact_meta = _compact_task_meta(info) if isinstance(info, dict) else {}
             if compact_meta:
                 _write_cached_task_snapshot(tid, state, compact_meta)
             res["state"] = "PROGRESS"
-            res["control_state"] = control_state
+            res["control_state"] = tracked_control_state
             res["meta"] = compact_meta
             return jsonify(res)
         return jsonify(res)
@@ -1762,12 +1983,17 @@ def api_logs():
 # Clear logs
 @app.route("/api/logs/clear", methods=["POST"])
 def api_clear_logs():
-    """Clear log file."""
+    """Archive the current log before clearing the active file."""
     try:
+        archive_dir = Path(LOG_FILE).parent / "archive"
+        archive_dir.mkdir(mode=0o700, exist_ok=True)
+        archive = archive_dir / f"spo_backup_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}.log"
+        shutil.copy2(LOG_FILE, archive)
+        archive.chmod(0o600)
         with open(LOG_FILE, "w") as f:
             f.write("")
-        log.info("Logs cleared by user")
-        return jsonify({"status": "cleared"})
+        log.warning("Logs archived and cleared by admin: %s", archive)
+        return jsonify({"status": "cleared", "archive": str(archive)})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

@@ -543,7 +543,7 @@ class BackupRegistry:
                 payload = json.load(open(manifest_path))
             except Exception:
                 continue
-            for key in ("bytes_downloaded", "size_bytes", "total_size_bytes"):
+            for key in ("bytes_stored", "bytes_downloaded", "size_bytes", "total_size_bytes"):
                 try:
                     value = int(payload.get(key) or 0)
                 except (TypeError, ValueError):
@@ -692,9 +692,16 @@ class BackupRegistry:
             "entries": entries,
         }
 
-    def delete(self, tenant_slug: str, workload: str, backup_name: str) -> dict:
+    def delete(self, tenant_slug: str, workload: str, backup_name: str, expected_path: str = "") -> dict:
         path = self.resolve_backup_path(tenant_slug, workload, backup_name)
         if path:
+            root = self.legacy_root.resolve()
+            if path == root or root not in path.parents or path.name != backup_name:
+                return {"error": "Backup path is outside the configured backup root"}
+            if not expected_path or str(path) != str(Path(expected_path).resolve()):
+                return {"error": "Exact backup path confirmation is required"}
+            if path.is_symlink():
+                return {"error": "Symbolic-link backups cannot be deleted"}
             shutil.rmtree(path)
             self.invalidate_cache()
             log.info(f"Deleted backup: {path}")

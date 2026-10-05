@@ -2,6 +2,9 @@
 import json
 import logging
 import uuid
+import re
+import base64
+import binascii
 from datetime import datetime, timezone
 
 import msal
@@ -33,6 +36,38 @@ REQUIRED_SCOPES = [
 
 class TenantManager:
     LEGACY_TENANT_ID = "legacy-default"
+
+    @staticmethod
+    def _validate_fields(data, existing=None):
+        normalized = {}
+        for field in ("name", "primary_domain", "sharepoint_host", "tenant_id", "client_id", "object_id"):
+            if field in data:
+                value = data[field]
+                if not isinstance(value, str):
+                    raise ValueError(f"{field} must be text")
+                normalized[field] = value.strip()
+        for field in ("name", "primary_domain", "sharepoint_host", "tenant_id", "client_id"):
+            if field in normalized and not normalized[field]:
+                raise ValueError(f"{field} is required")
+        for field in ("tenant_id", "client_id", "object_id"):
+            if normalized.get(field):
+                try:
+                    uuid.UUID(normalized[field])
+                except ValueError as exc:
+                    raise ValueError(f"{field} must be a UUID") from exc
+        host_pattern = r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?"
+        for field in ("primary_domain", "sharepoint_host"):
+            if normalized.get(field) and (not re.fullmatch(host_pattern, normalized[field]) or "." not in normalized[field]):
+                raise ValueError(f"{field} must be a DNS hostname")
+        if "workloads_enabled" in data:
+            workloads = data["workloads_enabled"]
+            if not isinstance(workloads, list) or any(value not in {"sharepoint", "onedrive", "outlook", "teams"} for value in workloads):
+                raise ValueError("workloads_enabled contains an unsupported workload")
+        if "workload_target_selection" in data and not isinstance(data["workload_target_selection"], dict):
+            raise ValueError("workload_target_selection must be an object")
+        if "client_secret" in data and not isinstance(data["client_secret"], str):
+            raise ValueError("client_secret must be text")
+        return normalized
 
     def _load(self):
         return self._normalize_config(load_config())
@@ -137,12 +172,13 @@ class TenantManager:
 
     def add_tenant(self, data):
         cfg = self._load()
+        normalized = self._validate_fields(data)
         required = ["name", "primary_domain", "sharepoint_host", "tenant_id", "client_id", "client_secret"]
         for field in required:
             if not data.get(field):
                 raise ValueError(f"Missing required field: {field}")
         for tenant in cfg.get("tenants", []):
-            if tenant.get("tenant_id") == data["tenant_id"]:
+            if str(tenant.get("tenant_id") or "").lower() == normalized["tenant_id"].lower():
                 raise ValueError(f"Tenant already exists: {data['tenant_id']}")
         new_tenant = {
             "id": str(uuid.uuid4()),
@@ -166,15 +202,23 @@ class TenantManager:
 
     def update_tenant(self, tenant_id, data):
         cfg = self._load()
+        normalized = self._validate_fields(data)
+        proposed_tenant_id = normalized.get("tenant_id")
+        if proposed_tenant_id and any(
+            tenant.get("id") != tenant_id and str(tenant.get("tenant_id") or "").lower() == proposed_tenant_id.lower()
+            for tenant in cfg.get("tenants", [])
+        ):
+            raise ValueError("Tenant ID is already configured")
         for idx, tenant in enumerate(cfg.get("tenants", [])):
             if tenant.get("id") != tenant_id:
                 continue
             for field in [
                 "name", "primary_domain", "sharepoint_host", "tenant_id",
                 "client_id", "object_id", "workloads_enabled", "workload_target_selection",
+                "sharepoint_target_size_cache",
             ]:
                 if field in data:
-                    cfg["tenants"][idx][field] = data[field]
+                    cfg["tenants"][idx][field] = normalized.get(field, data[field])
             if data.get("client_secret") and data["client_secret"] != "***MASKED***":
                 cfg["tenants"][idx]["client_secret"] = data["client_secret"]
             self._save(cfg)
@@ -206,6 +250,12 @@ class TenantManager:
             if "access_token" not in result:
                 return {"status": "error", "message": result.get("error_description", "Auth failed"), "details": result}
             token = result["access_token"]
+            try:
+                segment = token.split(".")[1]
+                claims = json.loads(base64.urlsafe_b64decode(segment + "=" * (-len(segment) % 4)))
+                granted_roles = set(claims.get("roles") or [])
+            except (IndexError, ValueError, binascii.Error, AttributeError):
+                granted_roles = set()
             headers = {"Authorization": f"Bearer {token}"}
             session = build_retry_session()
             tests = {}
@@ -217,6 +267,18 @@ class TenantManager:
                 tests["sharepoint"] = {"status": sp.status_code, "ok": sp.status_code == 200}
             users = session.get("https://graph.microsoft.com/v1.0/users?$top=1", headers=headers, timeout=(10, 20))
             tests["users"] = {"status": users.status_code, "ok": users.status_code == 200}
+            from app.workloads import WORKLOAD_META
+
+            required = set()
+            for workload in tenant_data.get("workloads_enabled", DEFAULT_WORKLOADS_ENABLED):
+                required.update(WORKLOAD_META.get(workload, {}).get("required_scopes", []))
+            missing_roles = sorted(required - granted_roles)
+            tests["workload_permissions"] = {
+                "ok": not missing_roles,
+                "granted_roles": sorted(granted_roles),
+                "missing_roles": missing_roles,
+                "note": "Token roles are a preflight check; workload API access still requires a real operation test.",
+            }
             all_ok = all(t.get("ok", False) for t in tests.values())
             if tenant_id:
                 cfg = self._load()
@@ -231,6 +293,8 @@ class TenantManager:
                 warning_bits.append("Graph user discovery is blocked. Verify admin consent for User.Read.All / Files.Read.All / Mail.Read scopes.")
             if tests.get("sharepoint", {}).get("status") == 403:
                 warning_bits.append("SharePoint site discovery is blocked. Verify Sites.Read.All / Sites.FullControl.All consent.")
+            if missing_roles:
+                warning_bits.append("Missing Graph application roles for enabled workloads: " + ", ".join(missing_roles))
             return {
                 "status": "ok" if all_ok else "warning",
                 "message": "All tests passed" if all_ok else "Some tests failed",

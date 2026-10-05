@@ -1,5 +1,6 @@
 """Restore Manager v2 for multi-workload restore jobs."""
 import json
+import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,11 +34,34 @@ class RestoreManagerV2:
             errors.extend(job["result"].get("errors") or [])
         if job.get("error"):
             errors.append(job.get("error"))
-        if job.get("status") == "completed" and any(str(err).startswith("Fatal:") for err in errors):
-            job["status"] = "failed"
-            job["error"] = "; ".join(str(err) for err in errors[:3])
+        result = job.get("result") if isinstance(job.get("result"), dict) else {}
+        if job.get("status") == "completed" and (errors or result.get("items_failed") or result.get("targets_failed")):
+            job["status"] = self._result_status(result)
+            job["error"] = "; ".join(str(err) for err in errors[:3]) or None
             self.r.set(self._job_key(job["id"]), json.dumps(job))
         return job
+
+    @staticmethod
+    def _result_status(result: dict) -> str:
+        if result.get("cancelled"):
+            return "cancelled"
+        errors = result.get("errors") or []
+        if any(str(err).startswith("Fatal:") for err in errors):
+            return "failed"
+        failed = int(result.get("items_failed") or 0) + int(result.get("targets_failed") or 0)
+        if failed or errors:
+            completed = int(result.get("items_processed") or 0) + int(result.get("items_skipped") or 0)
+            completed += int(result.get("targets_processed") or 0)
+            return "partial" if completed else "failed"
+        return "completed"
+
+    @staticmethod
+    def _count_local_files(backup_path: str) -> int:
+        count = 0
+        for _, dirs, files in os.walk(backup_path):
+            dirs[:] = [name for name in dirs if not name.startswith(("_", "."))]
+            count += sum(1 for name in files if not name.startswith(("_", ".")))
+        return count
 
     def create_job(self, config: dict) -> dict:
         workload, mode, backup_path = self._validate_config(config)
@@ -157,6 +181,10 @@ class RestoreManagerV2:
         from app.operation_queue import OperationQueue
         from app.tasks import celery_app
 
+        queued_jobs = [job for job in self.list_jobs(limit=limit) if job.get("status") == "queued"]
+        if not queued_jobs:
+            return []
+
         queue = OperationQueue()
         queue_items = {
             (item.get("payload") or {}).get("job_id"): item
@@ -165,10 +193,7 @@ class RestoreManagerV2:
         active_task_ids = self._list_restore_task_ids()
         recovered = []
 
-        for job in self.list_jobs(limit=limit):
-            if job.get("status") != "queued":
-                continue
-
+        for job in queued_jobs:
             job_id = job["id"]
             task_id = job.get("task_id")
             backup_path = Path(str(job.get("backup_path") or "")).resolve() if job.get("backup_path") else None
@@ -240,13 +265,19 @@ class RestoreManagerV2:
             })
             return {"error": "Target tenant not found"}
 
+        expected_items = self._count_local_files(job["backup_path"]) if job["workload"] in {"sharepoint", "onedrive"} else 0
+        self.update_job(job_id, {"items_total": expected_items, "progress": 5})
+        current_progress = 5
+
         def progress_cb(evt, data):
+            nonlocal current_progress
             processed = data.get("items_processed", 0)
             failed = data.get("items_failed", 0)
-            total_so_far = processed + failed
-            progress = min(99, int((processed / max(total_so_far, 1)) * 100)) if total_so_far else 5
+            finished = processed + failed + (data.get("items_skipped") or 0)
+            if expected_items:
+                current_progress = max(current_progress, min(99, int(finished / expected_items * 100)))
             self.update_job(job_id, {
-                "progress": progress,
+                "progress": current_progress,
                 "current_target": data.get("target_name", ""),
                 "items_processed": processed,
                 "items_failed": failed,
@@ -279,18 +310,12 @@ class RestoreManagerV2:
                 **kwargs,
             )
             result = restorer.restore()
-            status = "completed"
-            if result.get("cancelled"):
-                status = "cancelled"
-            elif any(str(err).startswith("Fatal:") for err in (result.get("errors") or [])):
-                status = "failed"
-            elif result.get("targets_failed", 0) > 0 and result.get("targets_processed", 0) == 0:
-                status = "failed"
+            status = self._result_status(result)
             self.update_job(job_id, {
                 "status": status,
-                "progress": 100 if status in {"completed", "failed"} else job.get("progress", 0),
+                "progress": 100 if status in {"completed", "partial", "failed"} else current_progress,
                 "completed_at": datetime.now(timezone.utc).isoformat(),
-                "error": "; ".join(str(err) for err in (result.get("errors") or [])[:3]) if status == "failed" else None,
+                "error": "; ".join(str(err) for err in (result.get("errors") or [])[:3]) if status in {"partial", "failed"} else None,
                 "result": result,
             })
             return result

@@ -1,6 +1,9 @@
 """Per-tenant schedule and notification configuration manager."""
 import copy
 import logging
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from celery.schedules import crontab
 
 from app.backup_registry import slugify_tenant
 from app.config_manager import load_config, save_config
@@ -47,6 +50,12 @@ class ScheduleManager:
             current = self.get_schedule(tenant_id)
             current.update(schedule or {})
             self._validate_cron(current.get("cron_expression", ""))
+            try:
+                ZoneInfo(str(current.get("timezone") or ""))
+            except (ZoneInfoNotFoundError, ValueError) as exc:
+                raise ValueError("Invalid schedule timezone") from exc
+            if current["timezone"] != "Asia/Jakarta":
+                raise ValueError("Per-tenant schedules currently require Asia/Jakarta timezone")
             tenant["schedule"] = current
             self._save(cfg)
             log.info(
@@ -134,3 +143,9 @@ class ScheduleManager:
     def _validate_cron(self, expr: str):
         if not expr or len(str(expr).split()) != 5:
             raise ValueError(f"Invalid cron expression: '{expr}'. Must have 5 fields.")
+        parts = str(expr).split()
+        try:
+            crontab(minute=parts[0], hour=parts[1], day_of_month=parts[2],
+                    month_of_year=parts[3], day_of_week=parts[4])
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"Invalid cron expression: '{expr}'") from exc
