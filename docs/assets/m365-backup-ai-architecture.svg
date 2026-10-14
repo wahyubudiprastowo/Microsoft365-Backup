@@ -1,0 +1,241 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1050" viewBox="0 0 1800 1050" role="img" aria-labelledby="title desc">
+  <title id="title">Microsoft 365 Backup AI Agent System Architecture</title>
+  <desc id="desc">Architecture diagram showing Microsoft 365 Backup connected to a proposed AI Agent, Omni Router, policy gate, current web app, workers, Microsoft Graph, backup storage, remote destinations, and notification channels.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#08111f"/>
+      <stop offset="0.52" stop-color="#101833"/>
+      <stop offset="1" stop-color="#061f2a"/>
+    </linearGradient>
+    <linearGradient id="bluePanel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#132149"/>
+      <stop offset="1" stop-color="#0d1a2f"/>
+    </linearGradient>
+    <linearGradient id="purple" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7c5cff"/>
+      <stop offset="1" stop-color="#22d3ee"/>
+    </linearGradient>
+    <linearGradient id="green" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#10b981"/>
+      <stop offset="1" stop-color="#22c55e"/>
+    </linearGradient>
+    <linearGradient id="orange" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f59e0b"/>
+      <stop offset="1" stop-color="#fb923c"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#000000" flood-opacity="0.35"/>
+    </filter>
+    <filter id="softGlow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <marker id="arrowBlue" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#38bdf8"/>
+    </marker>
+    <marker id="arrowGreen" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#22c55e"/>
+    </marker>
+    <marker id="arrowOrange" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#f59e0b"/>
+    </marker>
+    <style>
+      .title { font: 800 36px 'Segoe UI', Arial, sans-serif; fill: #f8fafc; letter-spacing: .3px; }
+      .subtitle { font: 500 16px 'Segoe UI', Arial, sans-serif; fill: #94a3b8; }
+      .section { font: 800 17px 'Segoe UI', Arial, sans-serif; fill: #e5e7eb; letter-spacing: .7px; }
+      .label { font: 800 15px 'Segoe UI', Arial, sans-serif; fill: #f8fafc; }
+      .small { font: 500 12px 'Segoe UI', Arial, sans-serif; fill: #a8b3c7; }
+      .tiny { font: 600 10px 'Segoe UI', Arial, sans-serif; fill: #7dd3fc; letter-spacing: .6px; }
+      .tag { font: 800 10px 'Segoe UI', Arial, sans-serif; fill: #03131f; letter-spacing: .6px; }
+      .panel { fill: url(#bluePanel); stroke: #334c93; stroke-width: 2; rx: 18; filter: url(#shadow); }
+      .dashed { fill: rgba(12, 20, 40, .55); stroke: #60a5fa; stroke-width: 2; stroke-dasharray: 10 8; rx: 18; }
+      .box { fill: #111a35; stroke: #3f4f8f; stroke-width: 2; rx: 10; filter: url(#shadow); }
+      .box2 { fill: #0c1f2f; stroke: #0891b2; stroke-width: 2; rx: 10; filter: url(#shadow); }
+      .box3 { fill: #101d25; stroke: #22c55e; stroke-width: 2; rx: 10; filter: url(#shadow); }
+      .box4 { fill: #1f1a2e; stroke: #f59e0b; stroke-width: 2; rx: 10; filter: url(#shadow); }
+      .box5 { fill: #151526; stroke: #a855f7; stroke-width: 2; rx: 10; filter: url(#shadow); }
+      .store { fill: #111827; stroke: #fb923c; stroke-width: 2; rx: 10; filter: url(#shadow); }
+      .external { fill: #0b1f18; stroke: #22c55e; stroke-width: 2; rx: 10; filter: url(#shadow); }
+      .human { fill: #172033; stroke: #94a3b8; stroke-width: 2; rx: 10; filter: url(#shadow); }
+      .flowBlue { fill: none; stroke: #38bdf8; stroke-width: 3; marker-end: url(#arrowBlue); }
+      .flowGreen { fill: none; stroke: #22c55e; stroke-width: 3; marker-end: url(#arrowGreen); }
+      .flowOrange { fill: none; stroke: #f59e0b; stroke-width: 3; marker-end: url(#arrowOrange); }
+      .flowMuted { fill: none; stroke: #64748b; stroke-width: 2; stroke-dasharray: 6 6; }
+    </style>
+  </defs>
+
+  <rect width="1800" height="1050" fill="url(#bg)"/>
+  <circle cx="1450" cy="95" r="260" fill="#172554" opacity=".22"/>
+  <circle cx="310" cy="900" r="330" fill="#083344" opacity=".25"/>
+
+  <text x="900" y="48" text-anchor="middle" class="title">Microsoft 365 Backup + AI Agent System Architecture</text>
+  <text x="900" y="76" text-anchor="middle" class="subtitle">Current production app surfaces connected to a proposed Omni Router / AI automation layer</text>
+
+  <!-- Operator and AI layer -->
+  <rect x="48" y="160" width="250" height="86" class="human"/>
+  <text x="173" y="194" text-anchor="middle" class="label">Operator / Admin</text>
+  <text x="173" y="218" text-anchor="middle" class="small">Web UI, chat, approvals</text>
+
+  <rect x="48" y="305" width="250" height="90" class="box5"/>
+  <text x="173" y="337" text-anchor="middle" class="label">AI Agent Console</text>
+  <text x="173" y="361" text-anchor="middle" class="small">proposed</text>
+  <text x="173" y="378" text-anchor="middle" class="small">natural-language ops</text>
+
+  <rect x="48" y="445" width="250" height="110" class="box5"/>
+  <text x="173" y="477" text-anchor="middle" class="label">Omni Router</text>
+  <text x="173" y="501" text-anchor="middle" class="small">proposed model gateway</text>
+  <text x="173" y="520" text-anchor="middle" class="small">intent routing</text>
+  <text x="173" y="538" text-anchor="middle" class="small">tool selection</text>
+
+  <rect x="48" y="610" width="250" height="112" class="box4"/>
+  <text x="173" y="642" text-anchor="middle" class="label">Policy Guard</text>
+  <text x="173" y="666" text-anchor="middle" class="small">approval gate</text>
+  <text x="173" y="685" text-anchor="middle" class="small">secret redaction</text>
+  <text x="173" y="703" text-anchor="middle" class="small">risk classification</text>
+
+  <!-- Docker host -->
+  <rect x="352" y="125" width="960" height="820" class="dashed"/>
+  <text x="832" y="154" text-anchor="middle" class="section">DOCKER HOST / MICROSOFT 365 BACKUP APP</text>
+  <text x="832" y="178" text-anchor="middle" class="subtitle">Flask + Celery + Redis + filesystem manifests + Microsoft Graph integrations</text>
+
+  <rect x="392" y="210" width="220" height="96" class="box2"/>
+  <text x="502" y="244" text-anchor="middle" class="label">Tool Adapter</text>
+  <text x="502" y="267" text-anchor="middle" class="small">proposed HTTP / MCP</text>
+  <text x="502" y="286" text-anchor="middle" class="small">safe API wrapper</text>
+
+  <rect x="660" y="210" width="280" height="96" class="box"/>
+  <text x="800" y="244" text-anchor="middle" class="label">Flask Web + REST API</text>
+  <text x="800" y="267" text-anchor="middle" class="small">main.py, blueprints, templates</text>
+  <text x="800" y="286" text-anchor="middle" class="small">host port 5050 / container 5000</text>
+
+  <rect x="986" y="210" width="260" height="96" class="box"/>
+  <text x="1116" y="244" text-anchor="middle" class="label">Web Dashboard UI</text>
+  <text x="1116" y="267" text-anchor="middle" class="small">Dashboard, Tenants, Workloads</text>
+  <text x="1116" y="286" text-anchor="middle" class="small">Sites, Backups, Restore, Settings</text>
+
+  <rect x="392" y="360" width="255" height="118" class="box"/>
+  <text x="520" y="393" text-anchor="middle" class="label">Current Feature APIs</text>
+  <text x="520" y="419" text-anchor="middle" class="small">health, task, queue</text>
+  <text x="520" y="438" text-anchor="middle" class="small">tenants, workloads, schedules</text>
+  <text x="520" y="457" text-anchor="middle" class="small">backups, restore, settings, logs</text>
+
+  <rect x="695" y="360" width="255" height="118" class="box2"/>
+  <text x="823" y="393" text-anchor="middle" class="label">Operation Queue</text>
+  <text x="823" y="419" text-anchor="middle" class="small">serializes backup / download</text>
+  <text x="823" y="438" text-anchor="middle" class="small">restore jobs and active task state</text>
+  <text x="823" y="457" text-anchor="middle" class="small">prevents task collisions</text>
+
+  <rect x="990" y="360" width="255" height="118" class="box3"/>
+  <text x="1118" y="393" text-anchor="middle" class="label">Celery Workers</text>
+  <text x="1118" y="419" text-anchor="middle" class="small">backup worker</text>
+  <text x="1118" y="438" text-anchor="middle" class="small">restore worker</text>
+  <text x="1118" y="457" text-anchor="middle" class="small">scheduler / beat</text>
+
+  <rect x="392" y="535" width="188" height="108" class="box2"/>
+  <text x="486" y="569" text-anchor="middle" class="label">SharePoint</text>
+  <text x="486" y="593" text-anchor="middle" class="small">sites + libraries</text>
+  <text x="486" y="612" text-anchor="middle" class="small">resume manifests</text>
+
+  <rect x="608" y="535" width="188" height="108" class="box2"/>
+  <text x="702" y="569" text-anchor="middle" class="label">OneDrive</text>
+  <text x="702" y="593" text-anchor="middle" class="small">user drives</text>
+  <text x="702" y="612" text-anchor="middle" class="small">target scopes</text>
+
+  <rect x="824" y="535" width="188" height="108" class="box2"/>
+  <text x="918" y="569" text-anchor="middle" class="label">Outlook</text>
+  <text x="918" y="593" text-anchor="middle" class="small">mail, calendar</text>
+  <text x="918" y="612" text-anchor="middle" class="small">contacts export</text>
+
+  <rect x="1040" y="535" width="188" height="108" class="box2"/>
+  <text x="1134" y="569" text-anchor="middle" class="label">Teams</text>
+  <text x="1134" y="593" text-anchor="middle" class="small">teams, channels</text>
+  <text x="1134" y="612" text-anchor="middle" class="small">messages metadata</text>
+
+  <rect x="392" y="700" width="255" height="118" class="store"/>
+  <text x="520" y="734" text-anchor="middle" class="label">Backup Storage</text>
+  <text x="520" y="758" text-anchor="middle" class="small">/backup/sharepoint</text>
+  <text x="520" y="777" text-anchor="middle" class="small">/backup/m365</text>
+  <text x="520" y="796" text-anchor="middle" class="small">files, tmp, manifests</text>
+
+  <rect x="695" y="700" width="255" height="118" class="store"/>
+  <text x="823" y="734" text-anchor="middle" class="label">Redis + Registry</text>
+  <text x="823" y="758" text-anchor="middle" class="small">Celery broker / results</text>
+  <text x="823" y="777" text-anchor="middle" class="small">task snapshots</text>
+  <text x="823" y="796" text-anchor="middle" class="small">history + merged project view</text>
+
+  <rect x="990" y="700" width="255" height="118" class="store"/>
+  <text x="1118" y="734" text-anchor="middle" class="label">Config + Logs</text>
+  <text x="1118" y="758" text-anchor="middle" class="small">tenants, schedules</text>
+  <text x="1118" y="777" text-anchor="middle" class="small">remote destinations</text>
+  <text x="1118" y="796" text-anchor="middle" class="small">notifications, activity logs</text>
+
+  <rect x="392" y="858" width="855" height="54" fill="#0b1120" stroke="#334155" stroke-width="1.5" rx="10"/>
+  <text x="820" y="884" text-anchor="middle" class="small">All backup / restore execution stays inside the current backend and worker model. AI only calls controlled APIs after policy checks.</text>
+  <text x="820" y="902" text-anchor="middle" class="tiny">NO DIRECT SECRET READS • NO DIRECT REDIS MUTATION • APPROVAL FOR DESTRUCTIVE ACTIONS</text>
+
+  <!-- External services -->
+  <rect x="1398" y="140" width="310" height="90" class="external"/>
+  <text x="1553" y="174" text-anchor="middle" class="label">Microsoft Entra ID</text>
+  <text x="1553" y="198" text-anchor="middle" class="small">OAuth tokens / admin consent</text>
+
+  <rect x="1398" y="270" width="310" height="112" class="external"/>
+  <text x="1553" y="304" text-anchor="middle" class="label">Microsoft Graph</text>
+  <text x="1553" y="329" text-anchor="middle" class="small">SharePoint, OneDrive</text>
+  <text x="1553" y="348" text-anchor="middle" class="small">Exchange / Outlook, Teams</text>
+
+  <rect x="1398" y="438" width="310" height="112" class="external"/>
+  <text x="1553" y="472" text-anchor="middle" class="label">Remote Destinations</text>
+  <text x="1553" y="497" text-anchor="middle" class="small">SMB / FTP / FTPS</text>
+  <text x="1553" y="516" text-anchor="middle" class="small">SFTP / WebDAV</text>
+
+  <rect x="1398" y="606" width="310" height="112" class="external"/>
+  <text x="1553" y="640" text-anchor="middle" class="label">Notification Channels</text>
+  <text x="1553" y="665" text-anchor="middle" class="small">Email / Graph Mail</text>
+  <text x="1553" y="684" text-anchor="middle" class="small">Teams webhook / Telegram</text>
+
+  <rect x="1398" y="775" width="310" height="112" class="human"/>
+  <text x="1553" y="809" text-anchor="middle" class="label">SOC / IT Operators</text>
+  <text x="1553" y="834" text-anchor="middle" class="small">human approval</text>
+  <text x="1553" y="853" text-anchor="middle" class="small">restore and delete gates</text>
+
+  <!-- Flows -->
+  <path d="M173 246 V305" class="flowBlue"/>
+  <path d="M173 395 V445" class="flowBlue"/>
+  <path d="M173 555 V610" class="flowOrange"/>
+  <path d="M298 500 C335 500 350 258 392 258" class="flowBlue"/>
+  <path d="M298 666 C330 666 348 258 392 258" class="flowOrange"/>
+
+  <path d="M612 258 H660" class="flowBlue"/>
+  <path d="M940 258 H986" class="flowBlue"/>
+  <path d="M800 306 V360" class="flowBlue"/>
+  <path d="M647 419 H695" class="flowBlue"/>
+  <path d="M950 419 H990" class="flowBlue"/>
+
+  <path d="M1118 478 V535" class="flowBlue"/>
+  <path d="M1118 478 C1000 500 918 510 918 535" class="flowBlue"/>
+  <path d="M1118 478 C850 500 702 510 702 535" class="flowBlue"/>
+  <path d="M1118 478 C650 500 486 510 486 535" class="flowBlue"/>
+
+  <path d="M486 643 V700" class="flowOrange"/>
+  <path d="M702 643 C675 670 612 685 520 700" class="flowOrange"/>
+  <path d="M918 643 C865 676 720 694 647 736" class="flowOrange"/>
+  <path d="M1134 643 C1065 672 1008 690 990 724" class="flowOrange"/>
+
+  <path d="M1245 419 C1305 419 1340 326 1398 326" class="flowGreen"/>
+  <path d="M1228 589 C1302 575 1334 326 1398 326" class="flowGreen"/>
+  <path d="M1553 270 V230" class="flowGreen"/>
+  <path d="M1245 759 C1315 745 1342 494 1398 494" class="flowGreen"/>
+  <path d="M1245 780 C1315 775 1345 662 1398 662" class="flowGreen"/>
+  <path d="M298 666 C338 760 1330 828 1398 828" class="flowOrange"/>
+
+  <!-- Legend -->
+  <rect x="510" y="970" width="18" height="5" fill="#38bdf8"/>
+  <text x="538" y="976" class="small">API / control flow</text>
+  <rect x="700" y="970" width="18" height="5" fill="#22c55e"/>
+  <text x="728" y="976" class="small">Microsoft 365 / outbound integration</text>
+  <rect x="1010" y="970" width="18" height="5" fill="#f59e0b"/>
+  <text x="1038" y="976" class="small">persistence / approval / audit path</text>
+</svg>

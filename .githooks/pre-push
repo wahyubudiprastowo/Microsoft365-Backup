@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+
+REPO_ROOT=$(git rev-parse --show-toplevel)
+SCAN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/m365-pre-push.XXXXXX")
+trap 'rm -rf "$SCAN_DIR"' EXIT HUP INT TERM
+python3 "$REPO_ROOT/scripts/audit_publication.py" --snapshot "$SCAN_DIR/source"
+
+SCANNER=ghcr.io/gitleaks/gitleaks@sha256:75bdb2b2f4db213cde0b8295f13a88d6b333091bbfbf3012a4e083d00d31caba
+docker run --rm -v "$SCAN_DIR/source:/repo:ro" "$SCANNER" \
+  detect --source /repo --no-git --redact --log-level error
+while read -r local_ref local_oid remote_ref remote_oid; do
+  case "$local_oid" in
+    0000000000000000000000000000000000000000) continue ;;
+  esac
+  python3 "$REPO_ROOT/scripts/audit_publication.py" --history-ref "$local_oid"
+  docker run --rm -v "$REPO_ROOT:/repo:ro" "$SCANNER" \
+    detect --source /repo --log-opts="$local_oid" --redact --log-level error
+done

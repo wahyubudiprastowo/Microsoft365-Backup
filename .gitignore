@@ -1,0 +1,73 @@
+# Runtime data
+data/
+logs/
+redis/
+patch/
+app-source/
+@eaDir/
+
+# Secrets and local config
+.env
+.env.*
+!.env.example
+config/config.json
+spo-backup-final/.env
+spo-backup-final/config.json
+**/config.json
+**/config.*.json
+!**/config.example.json
+credentials.json
+**/token_cache*
+**/.msal*
+*.pfx
+*.p12
+*.jks
+*.bak
+*.backup
+*.sqlite
+*.sqlite3
+*.rdb
+*.aof
+# Historical binary patches are kept locally, never published.
+*.zip
+*.tar
+*.tgz
+*.tar.gz
+*.7z
+*.rar
+security-reports/
+*.pem
+*.key
+*.crt
+
+# Python cache / local tooling
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local debug / temp
+test-debug.py
+*.log
+docs/assets/raw/
+# Private operational notes and one-off environment scripts stay local.
+docs/*AUDIT*.md
+docs/CHECKLIST_EKSEKUSI_STATUS.md
+docs/PATCH_STATUS_*.md
+docs/PRD_CHECKLIST_REMEDIASI.md
+scripts/delete_*.py
+scripts/map_spo_sites_to_groups.py
+scripts/recover_deleted_m365_files.py

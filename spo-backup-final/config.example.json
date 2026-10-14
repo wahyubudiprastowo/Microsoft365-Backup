@@ -1,0 +1,62 @@
+{
+    "azure_ad": {
+        "_comment": "Create an Azure AD / Entra ID app registration with Microsoft Graph application permissions.",
+        "tenant_id": "YOUR_TENANT_ID",
+        "client_id": "YOUR_CLIENT_ID",
+        "object_id": "YOUR_OBJECT_ID",
+        "client_secret": "YOUR_CLIENT_SECRET",
+        "secret_expires": "YYYY-MM-DD",
+        "app_display_name": "SharepointBkpPython"
+    },
+    "sharepoint": {
+        "host": "your-tenant.sharepoint.com"
+    },
+    "sites": [
+        {
+            "name": "Example Site",
+            "path": "sites/ExampleSite",
+            "enabled": true
+        }
+    ],
+    "backup": {
+        "root_dir": "/backup/sharepoint",
+        "manifest_dir": "/backup/sharepoint/.manifests",
+        "max_retention_days": 30,
+        "chunk_size_mb": 10,
+        "remote_destinations": []
+    },
+    "schedule": {
+        "enabled": true,
+        "cron_expression": "0 2 * * *",
+        "timezone": "Asia/Jakarta"
+    },
+    "notification": {
+        "_comment": "method=graph (recommended) or smtp as fallback",
+        "enabled": false,
+        "method": "graph",
+        "smtp": {
+            "server": "smtp.office365.com",
+            "port": 587,
+            "username": "noreply@example.com",
+            "password": "YOUR_SMTP_PASSWORD"
+        },
+        "email_from": "noreply@example.com",
+        "email_to": [
+            "admin@example.com"
+        ],
+        "telegram": {
+            "enabled": false,
+            "bot_token": "YOUR_BOT_TOKEN",
+            "chat_ids": [
+                "-1001234567890"
+            ],
+            "parse_mode": "HTML"
+        },
+        "teams": {
+            "enabled": false,
+            "webhook_urls": [
+                "https://example.webhook.office.com/webhookb2/..."
+            ]
+        }
+    }
+}
